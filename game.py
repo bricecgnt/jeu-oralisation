@@ -17,8 +17,15 @@ Lancement :
 
 from __future__ import annotations
 
+import multiprocessing
+import os
 import sys
 import threading
+
+# Réduit l'activité en arrière-plan de Whisper/HF (évite des sous-processus et des
+# avertissements de parallélisme une fois empaqueté).
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
 
 import numpy as np
 import pygame
@@ -917,6 +924,10 @@ def main():
 
 
 if __name__ == "__main__":
+    # IMPORTANT (app empaquetée) : empêche le ré-lancement de l'application — donc
+    # l'ouverture d'une 2e fenêtre — quand une dépendance crée un sous-processus
+    # (multiprocessing « spawn » sur macOS). Doit être la toute première instruction.
+    multiprocessing.freeze_support()
     try:
         main()
     except KeyboardInterrupt:
