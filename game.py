@@ -246,6 +246,7 @@ class Game:
         self.show_picto = True
         self.picto_word = None          # mot pour lequel picto_surface est valide
         self.picto_surface = None
+        self.picto_found = False        # une image a-t-elle été trouvée pour picto_word
         self.picto_fetching = False
         self.word_change_t = 0
         self._picto_pending = None       # (mot, chemin|None) renvoyé par le thread
@@ -509,11 +510,14 @@ class Game:
             self.picto_fetching = False
             self.picto_word = pw
             self.picto_surface = None
+            self.picto_found = bool(path)
             if path:
                 try:
                     self.picto_surface = pygame.image.load(path).convert_alpha()
-                except Exception:
+                except Exception as e:
+                    print("Chargement image échoué :", e)
                     self.picto_surface = None
+                    self.picto_found = False
 
     # ---- feu d'artifice -------------------------------------------------
     def _spawn_fireworks(self):
@@ -707,10 +711,14 @@ class Game:
         self.screen.blit(glyph, glyph.get_rect(center=(cx, wy)))
 
         # mention de la source / indicateur de recherche (coin haut-gauche)
+        current = self.word.strip().lower()
         if pic is not None:
             note = "Pictogrammes : ARASAAC (arasaac.org)"
         elif self.show_picto and self.picto_fetching:
             note = "Recherche d'image…"
+        elif (self.show_picto and current and self.picto_word == current
+              and not self.picto_found):
+            note = "Aucune image trouvée pour ce mot (voir console)."
         else:
             note = ""
         if note:

@@ -74,6 +74,21 @@ sous licence **Creative Commons BY-NC-SA**. La 1re recherche d'un mot nécessite
 Internet ; les images sont ensuite mises en cache dans `pictos_cache/` (hors-ligne).
 Attribution requise en cas de diffusion : « Pictogrammes : ARASAAC (arasaac.org) ».
 
+**Aucun compte ni clé d'API n'est nécessaire** : les endpoints de recherche et de
+téléchargement sont publics (`api.arasaac.org` / `static.arasaac.org`).
+
+En cas de souci, lance le diagnostic (affiche l'URL, l'ID trouvé et l'erreur
+éventuelle) :
+
+```bash
+python pictos.py chat
+```
+
+Sur macOS, si tu vois une erreur `CERTIFICATE_VERIFY_FAILED`, l'app bascule
+automatiquement en mode non vérifié pour récupérer l'image ; tu peux aussi exécuter
+une fois *« Install Certificates.command »* (dans `/Applications/Python 3.x/`) ou
+`pip install certifi`.
+
 ## Comment marche la reconnaissance (`recognition.py`)
 
 Choix techniques pour rester **simple, local et universel** (sans calibrage par
