@@ -29,7 +29,9 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pictos_cache")
+from paths import pictos_cache_dir
+
+CACHE_DIR = pictos_cache_dir()
 SEARCH_URL = "https://api.arasaac.org/api/pictograms/fr/search/{}"
 IMAGE_URL = "https://static.arasaac.org/pictograms/{id}/{id}_300.png"
 _UA = {"User-Agent": "Mozilla/5.0 (jeu-oralisation)"}

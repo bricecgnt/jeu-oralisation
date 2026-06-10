@@ -71,7 +71,8 @@ correspondant au mot (au-dessus du texte). Désactivable.
 
 Les images proviennent d'[ARASAAC](https://arasaac.org) (Gouvernement d'Aragon),
 sous licence **Creative Commons BY-NC-SA**. La 1re recherche d'un mot nécessite
-Internet ; les images sont ensuite mises en cache dans `pictos_cache/` (hors-ligne).
+Internet ; les images sont ensuite mises en cache (hors-ligne) dans
+`~/Library/Caches/jeu-oralisation/pictos/`.
 Attribution requise en cas de diffusion : « Pictogrammes : ARASAAC (arasaac.org) ».
 
 **Aucun compte ni clé d'API n'est nécessaire** : les endpoints de recherche et de
@@ -119,11 +120,35 @@ voix) :
 python test_recognition.py
 ```
 
-## Empaqueter en application macOS (optionnel)
+## Empaqueter en application macOS cliquable
+
+Pour obtenir une **app `.app` lançable en un clic** (à glisser dans `/Applications`),
+avec le **modèle Whisper embarqué** :
 
 ```bash
-pip install pyinstaller
-pyinstaller --noconsole --onefile --name "Jeu d'oralisation" game.py
+chmod +x build_mac.sh
+./build_mac.sh base        # ou: ./build_mac.sh small  (plus précis, plus lourd)
 ```
 
-L'exécutable est généré dans `dist/`.
+Le script crée un environnement, pré-télécharge le modèle, puis lance PyInstaller via
+`jeu-oralisation.spec`. Résultat : **`dist/Jeu d'oralisation.app`**.
+
+> Au 1er lancement d'une app non signée : **clic droit → Ouvrir** (puis « Ouvrir »).
+> L'app demande l'autorisation micro (déclarée dans le bundle).
+
+### Caches (images et modèles)
+
+Une app `.app` est en lecture seule : les caches sont donc écrits dans un dossier
+**utilisateur persistant** (`~/Library/Caches/jeu-oralisation/`) :
+
+- `pictos/` : pictogrammes ARASAAC téléchargés ;
+- `whisper-models/` : modèles téléchargés à la volée (tailles non embarquées).
+
+Le modèle choisi via `./build_mac.sh <taille>` est, lui, **embarqué dans l'app**
+(dossier `models/whisper-<taille>/`, inclus par le `.spec`) → ce modèle fonctionne
+**hors-ligne dès le premier lancement**. Les autres tailles, si l'adulte les
+sélectionne, se téléchargent une fois puis sont mises en cache.
+
+> Construire l'app embarque Python + pygame + Whisper (ctranslate2/onnxruntime) :
+> compter **~0,5–1 Go** selon la taille du modèle. La construction se fait **sur un
+> Mac** (PyInstaller produit un binaire pour la plateforme courante).

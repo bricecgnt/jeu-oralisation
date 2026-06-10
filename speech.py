@@ -40,8 +40,13 @@ class WordRecognizer:
                 return True
             try:
                 from faster_whisper import WhisperModel
+                from paths import bundled_model_dir, whisper_cache_dir
+                # modèle embarqué dans l'app si présent, sinon téléchargement
+                # (mis en cache dans un dossier utilisateur inscriptible).
+                model_ref = bundled_model_dir(self.model_size) or self.model_size
                 self.model = WhisperModel(
-                    self.model_size, device="cpu", compute_type="int8")
+                    model_ref, device="cpu", compute_type="int8",
+                    download_root=whisper_cache_dir())
                 return True
             except Exception as e:  # pragma: no cover - dépend de l'environnement
                 self.load_error = str(e)

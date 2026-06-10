@@ -7,3 +7,5 @@ dist/
 *.egg-info/
 .DS_Store
 pictos_cache/
+models/
+*.app/
