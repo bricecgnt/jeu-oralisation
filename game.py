@@ -24,7 +24,11 @@ import numpy as np
 import pygame
 
 from recognition import VowelRecognizer, VOWELS
-from speech import WordRecognizer
+from speech import WordRecognizer, DEFAULT_MODEL
+import pictos
+
+# Tailles de modèle Whisper proposées à l'adulte (du plus rapide au plus précis).
+WHISPER_MODELS = ["tiny", "base", "small"]
 
 # Micro optionnel : si sounddevice est absent ou sans périphérique, on bascule
 # automatiquement en mode clavier (ESPACE).
@@ -227,7 +231,9 @@ class Game:
         self.confetti = []
         # mode « mot cible »
         self.word = ""                  # mot tapé par l'adulte
-        self.word_rec = WordRecognizer()
+        self.model_size = DEFAULT_MODEL
+        self.word_rec = WordRecognizer(self.model_size)
+        self.model_loading = False
         self.recording = False
         self.rec_start = 0
         self.transcribing = False
@@ -236,6 +242,13 @@ class Game:
         self.word_msg = ""              # message d'aide (mode mot)
         self._pending = None            # (texte, ok) renvoyé par le thread
         self.fireworks = []
+        # pictogramme ARASAAC
+        self.show_picto = True
+        self.picto_word = None          # mot pour lequel picto_surface est valide
+        self.picto_surface = None
+        self.picto_fetching = False
+        self.word_change_t = 0
+        self._picto_pending = None       # (mot, chemin|None) renvoyé par le thread
         self._cheer = self._make_cheer() if self.mixer_ok else None
         self._apply_sensitivity()
 
@@ -278,6 +291,8 @@ class Game:
         self.b_hold = Button("Reste en place"); self.b_hold.selected = self.hold
         self.b_speak = Button("🎤 Parler", kind="primary")
         self.b_clear = Button("Effacer")
+        self.b_model = Button(f"Modèle : {self.model_size}")
+        self.b_picto = Button("Image"); self.b_picto.selected = self.show_picto
         self.s_sens = Slider("Sensibilité", self.sensitivity)
         self.s_str = Slider("Exigence", (self.threshold - 0.2) / 0.65)
         self.b_mic = Button("▶︎ Démarrer le micro", kind="primary")
@@ -289,6 +304,8 @@ class Game:
         yield self.b_hold
         yield self.b_speak
         yield self.b_clear
+        yield self.b_model
+        yield self.b_picto
         yield self.b_mic
 
     def _sliders(self):
@@ -306,8 +323,11 @@ class Game:
         self.b_hold.visible = not word
         self.b_speak.visible = word
         self.b_clear.visible = word
+        self.b_model.visible = word
+        self.b_picto.visible = word
         self.b_speak.label = ("● J'écoute…" if self.recording else
                               "⏳ …" if self.transcribing else "🎤 Parler")
+        self.b_model.label = f"Modèle : {self.model_size}"
 
         pad, gap, h = 12, 6, 40
         x, y = pad, pad
@@ -329,6 +349,7 @@ class Game:
         place([self.b_vowel[v] for v in VOWELS], [40] * 5)
         place([self.b_hold], [148])
         place([self.b_speak, self.b_clear], [150, 96])
+        place([self.b_model, self.b_picto], [150, 96])
         place([self.s_sens], [156])
         place([self.s_str], [156])
         # micro aligné à droite si la place le permet, sinon à la suite
@@ -386,6 +407,35 @@ class Game:
         self.energy = 0.0; self.won = False; self.confetti = []
 
     # ---- mode « mot cible » --------------------------------------------
+    def _ensure_model_async(self):
+        """Précharge le modèle Whisper en arrière-plan (téléchargement au 1er usage)."""
+        if not self.word_rec.available or self.word_rec.model is not None \
+                or self.model_loading:
+            return
+        self.model_loading = True
+
+        def work():
+            self.word_rec.ensure_model()
+            self.model_loading = False
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _cycle_model(self):
+        i = (WHISPER_MODELS.index(self.model_size) + 1) % len(WHISPER_MODELS) \
+            if self.model_size in WHISPER_MODELS else 0
+        self.model_size = WHISPER_MODELS[i]
+        self.word_rec = WordRecognizer(self.model_size)
+        self.model_loading = False
+        self._ensure_model_async()
+
+    def _word_edited(self):
+        """Appelé quand le mot saisi change : réinitialise l'affichage du picto et
+        relance le compte à rebours du débounce."""
+        self.word_change_t = pygame.time.get_ticks()
+        self.picto_surface = None
+        self.word_ok = False
+        self.heard = ""
+
     def _start_recording(self):
         if not self.word.strip():
             self.word_msg = "Tape d'abord un mot à dire."; return
@@ -393,6 +443,8 @@ class Game:
             self.word_msg = "Démarre le micro pour écouter."; return
         if not self.word_rec.available:
             self.word_msg = "Installe faster-whisper (voir le README)."; return
+        if self.model_loading:
+            self.word_msg = f"Chargement du modèle « {self.model_size} »…"; return
         if self.recording or self.transcribing:
             return
         self.word_ok = False; self.heard = ""; self.word_msg = ""
@@ -403,9 +455,10 @@ class Game:
     def _start_transcribe(self, audio):
         self.transcribing = True
         target = self.word
+        rec = self.word_rec          # capturé au cas où le modèle change entre-temps
 
         def work():
-            text = self.word_rec.transcribe(audio, FS)
+            text = rec.transcribe(audio, FS)
             self._pending = (text, WordRecognizer.match(target, text))
 
         threading.Thread(target=work, daemon=True).start()
@@ -431,6 +484,36 @@ class Game:
                                  "requise au tout premier lancement.")
             elif not heard:
                 self.word_msg = "Je n'ai rien entendu, réessaie."
+
+        self._update_picto(now)
+
+    def _update_picto(self, now):
+        """Récupère automatiquement le pictogramme ARASAAC du mot saisi
+        (avec un délai pour ne pas interroger l'API à chaque frappe)."""
+        if not self.show_picto:
+            return
+        word = self.word.strip().lower()
+        stable = now - self.word_change_t > 700
+        if (word and stable and word != self.picto_word
+                and not self.picto_fetching):
+            self.picto_fetching = True
+            target = word
+
+            def work():
+                self._picto_pending = (target, pictos.fetch_picto(target))
+
+            threading.Thread(target=work, daemon=True).start()
+        if self._picto_pending is not None:
+            pw, path = self._picto_pending
+            self._picto_pending = None
+            self.picto_fetching = False
+            self.picto_word = pw
+            self.picto_surface = None
+            if path:
+                try:
+                    self.picto_surface = pygame.image.load(path).convert_alpha()
+                except Exception:
+                    self.picto_surface = None
 
     # ---- feu d'artifice -------------------------------------------------
     def _spawn_fireworks(self):
@@ -478,7 +561,10 @@ class Game:
             if b.rect.collidepoint(pos):
                 for x in self.b_mode.values():
                     x.selected = False
-                b.selected = True; self.mode = key; self.reset_progress(); return
+                b.selected = True; self.mode = key; self.reset_progress()
+                if key == "word":
+                    self._ensure_model_async()
+                return
         for key, b in self.b_vowel.items():
             if b.visible and b.rect.collidepoint(pos):
                 for x in self.b_vowel.values():
@@ -492,7 +578,16 @@ class Game:
             self._start_recording(); return
         if self.b_clear.visible and self.b_clear.rect.collidepoint(pos):
             self.word = ""; self.heard = ""; self.word_ok = False
-            self.word_msg = ""; return
+            self.word_msg = ""; self.picto_word = None; self.picto_surface = None
+            return
+        if self.b_model.visible and self.b_model.rect.collidepoint(pos):
+            self._cycle_model(); return
+        if self.b_picto.visible and self.b_picto.rect.collidepoint(pos):
+            self.show_picto = not self.show_picto
+            self.b_picto.selected = self.show_picto
+            self.picto_surface = None
+            self.picto_word = None       # forcera une nouvelle récupération si réactivé
+            return
         if self.b_mic.rect.collidepoint(pos):
             self.toggle_mic(); return
 
@@ -582,18 +677,45 @@ class Game:
 
     def _draw_word_scene(self, r):
         x0, y0, w, h = r
+        cx = x0 + w // 2
         self.screen.blit(self.gradient("word", w, h, (224, 242, 255),
                                        (255, 241, 230)), (x0, y0))
         success = self.word_ok and pygame.time.get_ticks() - self.win_time < 2600
+
+        # pictogramme ARASAAC (si disponible et correspondant au mot courant)
+        pic = self.picto_surface if (
+            self.show_picto and self.picto_surface is not None
+            and self.picto_word == self.word.strip().lower()) else None
+        if pic is not None:
+            ph = int(min(h * 0.42, 300))
+            scale = ph / pic.get_height()
+            pic2 = pygame.transform.smoothscale(
+                pic, (int(pic.get_width() * scale), ph))
+            self.screen.blit(pic2, pic2.get_rect(center=(cx, y0 + int(h * 0.40))))
+
+        # mot (sous le picto s'il y en a un, sinon centré)
         word = self.word if self.word.strip() else "…"
         color = COL["ok"] if success else COL["text"]
         glyph = self.font_big.render(word, True, color)
-        maxw, maxh = w * 0.9, (h) * 0.55
+        maxw = w * 0.9
+        maxh = h * 0.26 if pic is not None else h * 0.55
         sc = min(maxw / glyph.get_width(), maxh / glyph.get_height(), 1.0)
         if sc < 1.0:
             glyph = pygame.transform.smoothscale(
                 glyph, (int(glyph.get_width() * sc), int(glyph.get_height() * sc)))
-        self.screen.blit(glyph, glyph.get_rect(center=(x0 + w // 2, y0 + h // 2 - 10)))
+        wy = y0 + int(h * 0.76) if pic is not None else y0 + h // 2 - 10
+        self.screen.blit(glyph, glyph.get_rect(center=(cx, wy)))
+
+        # mention de la source / indicateur de recherche (coin haut-gauche)
+        if pic is not None:
+            note = "Pictogrammes : ARASAAC (arasaac.org)"
+        elif self.show_picto and self.picto_fetching:
+            note = "Recherche d'image…"
+        else:
+            note = ""
+        if note:
+            self.screen.blit(self.font_small.render(note, True, COL["muted"]),
+                             (x0 + 12, y0 + 10))
         self._draw_fireworks()
 
     def _flag(self, x, y):
@@ -707,7 +829,9 @@ class Game:
         x0, y0, w, h = r
         now = pygame.time.get_ticks()
         if self.mode == "word":
-            if self.recording:
+            if self.model_loading:
+                msg = f"⏳ Chargement du modèle « {self.model_size} »… (1re fois : téléchargement)"
+            elif self.recording:
                 msg = "🎤 J'écoute… dis le mot !"
             elif self.transcribing:
                 msg = "⏳ Je réfléchis…"
@@ -761,12 +885,12 @@ class Game:
                     elif self.mode == "word":
                         # saisie du mot par l'adulte
                         if ev.key == pygame.K_BACKSPACE:
-                            self.word = self.word[:-1]
+                            self.word = self.word[:-1]; self._word_edited()
                         elif ev.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
                             self._start_recording()
                         elif ev.unicode and (ev.unicode.isalpha() or ev.unicode in " -'") \
                                 and len(self.word) < 22:
-                            self.word += ev.unicode
+                            self.word += ev.unicode; self._word_edited()
                     elif ev.key == pygame.K_SPACE:
                         self.space_down = True
                     elif ev.unicode and ev.unicode.upper() in VOWELS and self.mode == "target":

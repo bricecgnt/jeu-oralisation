@@ -52,13 +52,27 @@ Au premier lancement, macOS demande l'autorisation d'accès au **micro** : accep
 3. L'enfant clique **« 🎤 Parler »** (ou touche **Entrée**) et dit le mot : l'app
    écoute ~2 s, transcrit localement, et lance un **feu d'artifice** si c'est bon.
 
-> Au tout premier usage de ce mode, `faster-whisper` télécharge le modèle (~150 Mo)
-> depuis Hugging Face — **connexion Internet requise une seule fois**. Ensuite, tout
-> fonctionne hors-ligne. Taille du modèle réglable dans `speech.py` (`DEFAULT_MODEL` :
-> `tiny` / `base` / `small`) ; `small` est plus précis mais plus lent.
+**Bouton « Modèle »** : bascule la taille du modèle Whisper — `tiny` (rapide) →
+`base` → `small` (plus précis, plus lent). L'adulte choisit selon le besoin. Chaque
+taille se télécharge à son premier usage, puis reste en cache.
+
+**Bouton « Image »** : récupère et affiche automatiquement un **pictogramme ARASAAC**
+correspondant au mot (au-dessus du texte). Désactivable.
+
+> Au tout premier usage de ce mode, `faster-whisper` télécharge le modèle (~75–460 Mo
+> selon la taille) depuis Hugging Face — **connexion Internet requise une seule fois**
+> par taille de modèle. Ensuite, tout fonctionne hors-ligne. (Modèle par défaut dans
+> `speech.py` : `DEFAULT_MODEL`.)
 >
 > Whisper reste perfectible sur un **mot isolé** prononcé par un enfant ; la
 > correspondance est volontairement tolérante (accents, petites erreurs).
+
+### Pictogrammes ARASAAC
+
+Les images proviennent d'[ARASAAC](https://arasaac.org) (Gouvernement d'Aragon),
+sous licence **Creative Commons BY-NC-SA**. La 1re recherche d'un mot nécessite
+Internet ; les images sont ensuite mises en cache dans `pictos_cache/` (hors-ligne).
+Attribution requise en cas de diffusion : « Pictogrammes : ARASAAC (arasaac.org) ».
 
 ## Comment marche la reconnaissance (`recognition.py`)
 
