@@ -105,6 +105,44 @@ class MicInput:
 
 
 # --------------------------------------------------------------------------
+# Curseur (slider) réglable à la souris
+# --------------------------------------------------------------------------
+class Slider:
+    def __init__(self, label, value):
+        self.label = label
+        self.value = float(value)     # 0..1
+        self.rect = pygame.Rect(0, 0, 10, 40)   # zone complète du widget
+        self.dragging = False
+        self.visible = True
+
+    def _track(self):
+        r = self.rect
+        return pygame.Rect(r.x, r.y + 24, r.w, 8)
+
+    def draw(self, surf, font):
+        if not self.visible:
+            return
+        r = self.rect
+        lbl = font.render(f"{self.label} : {int(round(self.value * 100))} %",
+                          True, COL["text"])
+        surf.blit(lbl, (r.x, r.y + 2))
+        t = self._track()
+        pygame.draw.rect(surf, (206, 212, 218), t, border_radius=4)
+        pygame.draw.rect(surf, COL["accent2"],
+                         (t.x, t.y, int(self.value * t.w), t.h), border_radius=4)
+        hx = int(t.x + self.value * t.w)
+        pygame.draw.circle(surf, COL["accent2"], (hx, t.centery), 9)
+        pygame.draw.circle(surf, (255, 255, 255), (hx, t.centery), 5)
+
+    def hit(self, pos):
+        return self._track().inflate(0, 20).collidepoint(pos)
+
+    def set_from_pos(self, pos):
+        t = self._track()
+        self.value = float(np.clip((pos[0] - t.x) / max(1, t.w), 0.0, 1.0))
+
+
+# --------------------------------------------------------------------------
 # Bouton cliquable
 # --------------------------------------------------------------------------
 class Button:
@@ -166,6 +204,7 @@ class Game:
         self.space_down = False
         self.sensitivity = 0.35
         self.threshold = 0.45           # exigence (confiance mini en mode cible)
+        self.hold = True                # le véhicule reste en place si le son cesse
         self.last = {"vol": 0.0, "voiced": False, "vowel": None, "confidence": 0.0}
         self.confetti = []
         self._cheer = self._make_cheer() if self.mixer_ok else None
@@ -206,16 +245,20 @@ class Game:
         self.b_mode["free"].selected = True
         self.b_vowel = {v: Button(v, key=v) for v in VOWELS}
         self.b_vowel["A"].selected = True
-        self.b_sens_m = Button("Sens −"); self.b_sens_p = Button("Sens +")
-        self.b_str_m = Button("Exig. −"); self.b_str_p = Button("Exig. +")
+        self.b_hold = Button("Reste en place"); self.b_hold.selected = self.hold
+        self.s_sens = Slider("Sensibilité", self.sensitivity)
+        self.s_str = Slider("Exigence", (self.threshold - 0.2) / 0.65)
         self.b_mic = Button("▶︎ Démarrer le micro", kind="primary")
 
     def _all_buttons(self):
         yield from self.b_scene.values()
         yield from self.b_mode.values()
         yield from self.b_vowel.values()
-        yield from (self.b_sens_m, self.b_sens_p, self.b_str_m, self.b_str_p,
-                    self.b_mic)
+        yield self.b_hold
+        yield self.b_mic
+
+    def _sliders(self):
+        return (self.s_sens, self.s_str)
 
     def _layout(self, w):
         """Place les boutons en lignes avec retour à la ligne."""
@@ -223,7 +266,7 @@ class Game:
         target = self.mode == "target"
         for v in self.b_vowel.values():
             v.visible = target
-        self.b_str_m.visible = self.b_str_p.visible = target
+        self.s_str.visible = target
 
         pad, gap, h = 12, 6, 40
         x, y = pad, pad
@@ -243,8 +286,9 @@ class Game:
         place(list(self.b_scene.values()), [108, 100, 92])
         place(list(self.b_mode.values()), [96, 96])
         place([self.b_vowel[v] for v in VOWELS], [40] * 5)
-        place([self.b_sens_m, self.b_sens_p], [78, 78])
-        place([self.b_str_m, self.b_str_p], [78, 78])
+        place([self.b_hold], [148])
+        place([self.s_sens], [156])
+        place([self.s_str], [156])
         # micro aligné à droite si la place le permet, sinon à la suite
         mic_w = 210
         if x + mic_w > w - pad:
@@ -278,15 +322,18 @@ class Game:
 
         if drive > 0.05:
             self.energy = min(1.0, self.energy + drive * 0.012)
-        else:
+        elif not self.hold:
             self.energy = max(0.0, self.energy - 0.006)
+        # en mode « Reste en place », l'énergie ne redescend pas quand le son cesse
 
+        now = pygame.time.get_ticks()
         if self.energy >= 1.0 and not self.won:
             self.won = True
-            self.win_time = pygame.time.get_ticks()
+            self.win_time = now
             self._play_cheer()
-        if self.won and self.energy < 0.6:
-            self.won = False
+        # après la célébration, on repart à zéro pour rejouer
+        if self.won and now - self.win_time > 1600:
+            self.reset_progress()
 
     def reset_progress(self):
         self.energy = 0.0; self.won = False; self.confetti = []
@@ -308,16 +355,34 @@ class Game:
                 for x in self.b_vowel.values():
                     x.selected = False
                 b.selected = True; self.vowel = key; return
-        if self.b_sens_m.rect.collidepoint(pos):
-            self.sensitivity = max(0.0, self.sensitivity - 0.1); self._apply_sensitivity(); return
-        if self.b_sens_p.rect.collidepoint(pos):
-            self.sensitivity = min(1.0, self.sensitivity + 0.1); self._apply_sensitivity(); return
-        if self.b_str_m.visible and self.b_str_m.rect.collidepoint(pos):
-            self.threshold = max(0.2, self.threshold - 0.05); return
-        if self.b_str_p.visible and self.b_str_p.rect.collidepoint(pos):
-            self.threshold = min(0.85, self.threshold + 0.05); return
+        if self.b_hold.rect.collidepoint(pos):
+            self.hold = not self.hold
+            self.b_hold.selected = self.hold
+            return
         if self.b_mic.rect.collidepoint(pos):
             self.toggle_mic(); return
+
+    def _apply_sliders(self):
+        self.sensitivity = self.s_sens.value
+        self._apply_sensitivity()
+        self.threshold = 0.2 + self.s_str.value * 0.65
+
+    def _slider_mousedown(self, pos):
+        for s in self._sliders():
+            if s.visible and s.hit(pos):
+                s.dragging = True
+                s.set_from_pos(pos)
+                self._apply_sliders()
+                return True
+        return False
+
+    def _slider_drag(self, pos):
+        moved = False
+        for s in self._sliders():
+            if s.dragging:
+                s.set_from_pos(pos); moved = True
+        if moved:
+            self._apply_sliders()
 
     def toggle_mic(self):
         if self.running_mic:
@@ -365,6 +430,8 @@ class Game:
         mouse = pygame.mouse.get_pos()
         for b in self._all_buttons():
             b.draw(self.screen, self.font, mouse)
+        for s in self._sliders():
+            s.draw(self.screen, self.font_small)
 
     def draw_scene(self, r):
         sx, sy, sw, sh = r
@@ -506,7 +573,13 @@ class Game:
                 if ev.type == pygame.QUIT:
                     running = False
                 elif ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
-                    self.on_click(ev.pos)
+                    if not self._slider_mousedown(ev.pos):
+                        self.on_click(ev.pos)
+                elif ev.type == pygame.MOUSEMOTION:
+                    self._slider_drag(ev.pos)
+                elif ev.type == pygame.MOUSEBUTTONUP and ev.button == 1:
+                    for s in self._sliders():
+                        s.dragging = False
                 elif ev.type == pygame.KEYDOWN:
                     if ev.key == pygame.K_SPACE:
                         self.space_down = True

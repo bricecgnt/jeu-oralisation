@@ -32,9 +32,12 @@ Au premier lancement, macOS demande l'autorisation d'accès au **micro** : accep
 - **Mode** : Son libre ou Son cible.
 - **Cible** (mode Son cible) : choisis la voyelle A / E / I / O / U (clic ou touche
   clavier correspondante).
-- **Sensibilité −/+** : ajuste le seuil de détection du son (monte-la si le micro est
-  peu réactif, baisse-la si l'environnement est bruyant).
-- **Exigence −/+** (mode cible) : niveau de ressemblance minimal pour avancer.
+- **Sensibilité** (slider) : ajuste le seuil de détection du son (monte-la si le micro
+  est peu réactif, baisse-la si l'environnement est bruyant).
+- **Exigence** (slider, mode cible) : niveau de ressemblance minimal pour avancer.
+- **Reste en place** : si activé (par défaut), le véhicule **conserve sa progression**
+  quand le son s'arrête, et ne repart pas à zéro. Désactive-le pour travailler le son
+  *tenu* (l'objet redescend alors si le son cesse).
 - **Micro** : démarrer / arrêter.
 - **ESPACE (maintenu)** : repli sans micro, pour tester le jeu ou récompenser
   manuellement.
