@@ -10,6 +10,9 @@ fusée) jusqu'au drapeau d'arrivée.
   de la voix, de la durée).
 - **Voyelle cible** : l'objet n'avance que si l'enfant prononce la bonne voyelle
   (A E I O U), reconnue par analyse des **formants** (voir plus bas).
+- **Mot cible** : l'adulte tape un mot, il s'affiche en grand, l'enfant le dit ; un
+  **feu d'artifice** salue la bonne réponse. Reconnaissance par **Whisper** local
+  (`faster-whisper`, open source, sans réseau après le 1er téléchargement).
 
 ## Installation (macOS)
 
@@ -39,8 +42,23 @@ Au premier lancement, macOS demande l'autorisation d'accès au **micro** : accep
   quand le son s'arrête, et ne repart pas à zéro. Désactive-le pour travailler le son
   *tenu* (l'objet redescend alors si le son cesse).
 - **Micro** : démarrer / arrêter.
-- **ESPACE (maintenu)** : repli sans micro, pour tester le jeu ou récompenser
-  manuellement.
+- **ESPACE (maintenu)** : repli sans micro (modes son), pour tester le jeu ou
+  récompenser manuellement.
+
+### Mode « Mot cible »
+
+1. Choisis le mode **Mot cible**, démarre le micro.
+2. **Tape un mot** au clavier (il s'affiche en grand). « Effacer » remet à zéro.
+3. L'enfant clique **« 🎤 Parler »** (ou touche **Entrée**) et dit le mot : l'app
+   écoute ~2 s, transcrit localement, et lance un **feu d'artifice** si c'est bon.
+
+> Au tout premier usage de ce mode, `faster-whisper` télécharge le modèle (~150 Mo)
+> depuis Hugging Face — **connexion Internet requise une seule fois**. Ensuite, tout
+> fonctionne hors-ligne. Taille du modèle réglable dans `speech.py` (`DEFAULT_MODEL` :
+> `tiny` / `base` / `small`) ; `small` est plus précis mais plus lent.
+>
+> Whisper reste perfectible sur un **mot isolé** prononcé par un enfant ; la
+> correspondance est volontairement tolérante (accents, petites erreurs).
 
 ## Comment marche la reconnaissance (`recognition.py`)
 
