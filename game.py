@@ -354,7 +354,7 @@ class Game:
 
         place(list(self.b_scene.values()), [108, 100, 92])
         place(list(self.b_mode.values()), [96, 96, 100])
-        place([self.b_vowel[v] for v in VOWELS], [40] * 5)
+        place([self.b_vowel[v] for v in VOWELS], [46] * len(VOWELS))
         place([self.b_hold], [148])
         place([self.b_speak, self.b_clear], [150, 96])
         place([self.b_model, self.b_picto], [150, 96])

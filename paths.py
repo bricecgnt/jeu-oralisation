@@ -53,6 +53,34 @@ def whisper_cache_dir() -> str:
     return d
 
 
+def docs_dir() -> str:
+    """Dossier de documents de l'utilisateur (listes de mots, récaps de séance) —
+    visible et éditable par l'orthophoniste, contrairement au cache."""
+    home = os.path.expanduser("~")
+    if sys.platform == "darwin":
+        base = os.path.join(home, "Documents", APP_NAME)
+    elif os.name == "nt":
+        base = os.path.join(home, "Documents", APP_NAME)
+    else:
+        base = os.path.join(home, APP_NAME)
+    os.makedirs(base, exist_ok=True)
+    return base
+
+
+def lists_dir() -> str:
+    """Dossier des listes de mots (.txt, un mot par ligne)."""
+    d = os.path.join(docs_dir(), "listes")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def exports_dir() -> str:
+    """Dossier des récapitulatifs de séance exportés (CSV)."""
+    d = os.path.join(docs_dir(), "seances")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
 def bundled_model_dir(size: str) -> str | None:
     """Chemin d'un modèle Whisper embarqué dans l'app (s'il a été inclus au build),
     sinon None (le modèle sera téléchargé à la volée)."""
