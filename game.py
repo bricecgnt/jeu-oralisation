@@ -30,7 +30,7 @@ os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
 import numpy as np
 import pygame
 
-from recognition import VowelRecognizer, VOWELS
+from recognition import VowelRecognizer, VOWELS, FRICATIVES
 from speech import WordRecognizer, DEFAULT_MODEL
 from session import SessionLog
 import pictos
@@ -309,6 +309,7 @@ class Game:
         self.b_mode["free"].selected = True
         self.b_vowel = {v: Button(v, key=v) for v in VOWELS}
         self.b_vowel["A"].selected = True
+        self.b_frica = {k: Button(k) for k in FRICATIVES}   # fricatives S/CH/F
         self.b_hold = Button("Reste en place"); self.b_hold.selected = self.hold
         self.b_speak = Button("🎤 Parler", kind="primary")
         self.b_clear = Button("Effacer")
@@ -328,6 +329,7 @@ class Game:
         yield from self.b_scene.values()
         yield from self.b_mode.values()
         yield from self.b_vowel.values()
+        yield from self.b_frica.values()
         yield self.b_hold
         yield self.b_speak
         yield self.b_clear
@@ -349,6 +351,8 @@ class Game:
         target = self.mode == "target"
         word = self.mode == "word"
         for v in self.b_vowel.values():
+            v.visible = target
+        for v in self.b_frica.values():
             v.visible = target
         self.s_str.visible = target
         self.s_sens.visible = not word            # Whisper n'utilise pas la sensibilité
@@ -388,6 +392,7 @@ class Game:
         place(list(self.b_scene.values()), [108, 100, 92])
         place(list(self.b_mode.values()), [96, 96, 100])
         place([self.b_vowel[v] for v in VOWELS], [46] * len(VOWELS))
+        place([self.b_frica[k] for k in FRICATIVES], [52] * len(FRICATIVES))
         place([self.b_hold], [148])
         place([self.b_speak, self.b_clear], [150, 96])
         place([self.b_list, self.b_next], [188, 124])
@@ -411,10 +416,14 @@ class Game:
     # ---- audio / logique ------------------------------------------------
     def analyze(self):
         if self.space_down:
-            return {"vol": 0.9, "voiced": True, "vowel": self.vowel,
-                    "confidence": 1.0}
+            # repli clavier : simule le son cible (voyelle ou fricative)
+            frica = self.vowel if self.vowel in FRICATIVES else None
+            return {"vol": 0.9, "voiced": frica is None, "f0": 200.0,
+                    "vowel": self.vowel, "confidence": 1.0,
+                    "frica": frica, "frica_conf": 1.0}
         if not self.running_mic:
-            return {"vol": 0.0, "voiced": False, "vowel": None, "confidence": 0.0}
+            return {"vol": 0.0, "voiced": False, "f0": 0.0, "vowel": None,
+                    "confidence": 0.0, "frica": None, "frica_conf": 0.0}
         return self.rec.process(self.mic.frame())
 
     def update(self):
@@ -425,9 +434,13 @@ class Game:
         r = self.analyze()
         self.last = r
         if self.mode == "target":
-            matched = (r["voiced"] and r["vowel"] == self.vowel
-                       and r["confidence"] >= self.threshold)
-            drive = r["vol"] * (0.4 + 0.6 * r["confidence"]) if matched else 0.0
+            if self.vowel in FRICATIVES:
+                conf = r.get("frica_conf", 0.0) if r.get("frica") == self.vowel else 0.0
+                matched = r.get("vol", 0) > 0.04 and conf >= self.threshold
+            else:
+                conf = r["confidence"] if r["voiced"] and r["vowel"] == self.vowel else 0.0
+                matched = conf >= self.threshold
+            drive = r["vol"] * (0.4 + 0.6 * conf) if matched else 0.0
         else:
             drive = r["vol"] if r["voiced"] or self.space_down else 0.0
 
@@ -641,9 +654,10 @@ class Game:
                 return
         for key, b in self.b_vowel.items():
             if b.visible and b.rect.collidepoint(pos):
-                for x in self.b_vowel.values():
-                    x.selected = False
-                b.selected = True; self.vowel = key; return
+                self._select_target(key); return
+        for key, b in self.b_frica.items():
+            if b.visible and b.rect.collidepoint(pos):
+                self._select_target(key); return
         if self.b_hold.visible and self.b_hold.rect.collidepoint(pos):
             self.hold = not self.hold
             self.b_hold.selected = self.hold
@@ -737,10 +751,20 @@ class Game:
                 self.running_mic = False
 
     def select_vowel(self, v):
+        self._select_target(v)
+
+    def _select_target(self, sound):
+        """Sélectionne une cible (voyelle ou fricative) et désélectionne l'autre
+        groupe."""
         for x in self.b_vowel.values():
             x.selected = False
-        self.b_vowel[v].selected = True
-        self.vowel = v
+        for x in self.b_frica.values():
+            x.selected = False
+        if sound in self.b_vowel:
+            self.b_vowel[sound].selected = True
+        elif sound in self.b_frica:
+            self.b_frica[sound].selected = True
+        self.vowel = sound
 
     # ---- rendu ----------------------------------------------------------
     def gradient(self, key, w, h, top, bottom):
@@ -927,8 +951,7 @@ class Game:
         if self.mode != "target":
             return
         x0, y0, w, h = r
-        hit = (self.last.get("voiced") and self.last.get("vowel") == self.vowel
-               and self.last.get("confidence", 0) >= self.threshold)
+        hit = self._target_conf() >= self.threshold
         color = (81, 207, 102, 130) if hit else (255, 138, 61, 60)
         glyph = self.font_big.render(self.vowel, True, color[:3])
         glyph.set_alpha(color[3])
@@ -945,12 +968,23 @@ class Game:
         self.screen.blit(panel, (x, y))
         self._bar("Volume", self.last.get("vol", 0), COL["accent"], x + 12, y + 12, 170)
         if self.mode == "target":
-            conf = self.last.get("confidence", 0) if self.last.get("vowel") == self.vowel else 0
-            ok = self.last.get("voiced") and self.last.get("vowel") == self.vowel and conf >= self.threshold
-            self._bar(f"Ressemblance ({self.last.get('vowel') or '—'})", conf,
-                      COL["ok"] if ok else (206, 212, 218), x + 12, y + 52, 170)
+            conf = self._target_conf()
+            heard = (self.last.get("frica") if self.vowel in FRICATIVES
+                     else self.last.get("vowel")) or "—"
+            self._bar(f"Ressemblance ({heard})", conf,
+                      COL["ok"] if conf >= self.threshold else (206, 212, 218),
+                      x + 12, y + 52, 170)
             mx = x + 12 + int(self.threshold * 170)
             pygame.draw.line(self.screen, COL["danger"], (mx, y + 66), (mx, y + 82), 2)
+
+    def _target_conf(self) -> float:
+        """Confiance courante pour la cible sélectionnée (voyelle ou fricative)."""
+        if self.vowel in FRICATIVES:
+            return (self.last.get("frica_conf", 0.0)
+                    if self.last.get("frica") == self.vowel else 0.0)
+        if self.last.get("voiced") and self.last.get("vowel") == self.vowel:
+            return self.last.get("confidence", 0.0)
+        return 0.0
 
     def _bar(self, label, val, color, x, y, w):
         self.screen.blit(self.font_small.render(label, True, COL["text"]), (x, y))
