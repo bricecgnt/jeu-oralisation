@@ -41,6 +41,9 @@ VOWELS = list(VOWEL_REFS.keys())
 # classées par la forme du spectre du bruit, pas par les formants.
 FRICATIVES = ["S", "CH", "F"]
 
+# Fricatives SONORES (voisées) : mêmes formes spectrales que S/F mais avec voix.
+VOICED_FRICATIVES = ["V", "Z"]
+
 # Références (centroïde Hz, part d'énergie > 4,5 kHz, platitude spectrale).
 # /s/ : énergie concentrée très aiguë ; /ʃ/ : concentrée médium (~3 kHz) ;
 # /f/ : diffuse (plate) et faible. Ajustées sur bruits synthétiques.
@@ -48,6 +51,12 @@ FRICA_REFS: dict[str, tuple[float, float, float]] = {
     "S": (6300, 0.78, 0.30),
     "CH": (3100, 0.10, 0.25),
     "F": (4200, 0.45, 0.75),
+}
+
+# /z/ ≈ /s/ (alvéolaire, aigu) mais voisée ; /v/ ≈ /f/ (diffuse) mais voisée.
+VFRICA_REFS: dict[str, tuple[float, float, float]] = {
+    "Z": (6000, 0.70, 0.30),
+    "V": (4200, 0.42, 0.74),
 }
 
 # Poids de F3 dans la distance (plus faible : F3 est plus bruité que F1/F2).
@@ -175,10 +184,9 @@ class VowelRecognizer:
             return False, 0.0
         return True, self.fs / (lo + i)
 
-    def _fricative(self, x: np.ndarray) -> tuple[str | None, float]:
-        """Classifie une fricative sourde tenue (S/CH/F) d'après la forme du
-        spectre du bruit : centroïde (aigu pour S, médium pour CH), part
-        d'énergie > 4,5 kHz, et platitude spectrale (élevée pour F, diffus)."""
+    def _noise_features(self, x: np.ndarray) -> tuple[float, float, float] | None:
+        """Forme du spectre du bruit : (centroïde Hz, part d'énergie > 4,5 kHz,
+        platitude spectrale)."""
         n = len(x)
         P = np.abs(np.fft.rfft(x * np.hanning(n))) ** 2
         freqs = np.fft.rfftfreq(n, 1.0 / self.fs)
@@ -186,24 +194,43 @@ class VowelRecognizer:
         Ps, Fs = P[sel], freqs[sel]
         tot = float(Ps.sum())
         if tot <= 0:
-            return None, 0.0
+            return None
         centroid = float((Ps * Fs).sum() / tot)
         hi = float(Ps[Fs >= 4500].sum() / tot)
         pos = Ps + 1e-12
         flat = float(np.exp(np.mean(np.log(pos))) / np.mean(pos))
+        return centroid, hi, flat
 
+    @staticmethod
+    def _classify_noise(feats, refs, keys) -> tuple[str, float]:
         def vec(c, h, fl):
             return np.array([c / 1500.0, h * 3.0, fl * 3.0])
 
-        feat = vec(centroid, hi, flat)
-        ds = np.array([np.linalg.norm(feat - vec(*FRICA_REFS[k]))
-                       for k in FRICATIVES])
+        feat = vec(*feats)
+        ds = np.array([np.linalg.norm(feat - vec(*refs[k])) for k in keys])
         logits = -ds / 0.8
         logits -= logits.max()
         p = np.exp(logits)
         p /= p.sum()
         i = int(np.argmax(p))
-        return FRICATIVES[i], float(p[i])
+        return keys[i], float(p[i])
+
+    def _fricative(self, x: np.ndarray) -> tuple[str | None, float]:
+        """Fricative sourde tenue (S/CH/F)."""
+        feats = self._noise_features(x)
+        if feats is None:
+            return None, 0.0
+        return self._classify_noise(feats, FRICA_REFS, FRICATIVES)
+
+    def _voiced_fricative(self, feats) -> tuple[str | None, float]:
+        """Fricative SONORE (V/Z) : son voisé MAIS avec beaucoup de bruit aigu
+        (ce qui n'arrive pas pour une voyelle)."""
+        if feats is None:
+            return None, 0.0
+        centroid, hi, _ = feats
+        if hi < 0.12 or centroid < 2500:
+            return None, 0.0
+        return self._classify_noise(feats, VFRICA_REFS, VOICED_FRICATIVES)
 
     # ---- haut niveau ----------------------------------------------------
     def process(self, frame: np.ndarray) -> dict:
@@ -215,11 +242,17 @@ class VowelRecognizer:
         rms = float(np.sqrt(np.mean(x * x)))
         vol = float(np.clip((rms - self.noise_floor) / 0.15, 0.0, 1.0))
         voiced, f0 = self._pitch(x, rms)
+        noise = self._noise_features(x)
 
         # fricative sourde : son non voisé mais énergique (S / CH / F)
         frica, frica_conf = (None, 0.0)
-        if not voiced and vol > 0.04:
-            frica, frica_conf = self._fricative(x)
+        if not voiced and vol > 0.04 and noise is not None:
+            frica, frica_conf = self._classify_noise(noise, FRICA_REFS, FRICATIVES)
+
+        # fricative sonore : son voisé AVEC bruit aigu (V / Z)
+        vfrica, vfrica_conf = (None, 0.0)
+        if voiced and vol > 0.05:
+            vfrica, vfrica_conf = self._voiced_fricative(noise)
 
         # pré-accentuation + fenêtre de Hamming avant LPC
         emph = np.append(x[0], x[1:] - 0.97 * x[:-1])
@@ -232,6 +265,8 @@ class VowelRecognizer:
             "f0": f0,
             "frica": frica,
             "frica_conf": frica_conf,
+            "vfrica": vfrica,
+            "vfrica_conf": vfrica_conf,
             "formants": formants,
             "vowel": None,
             "confidence": 0.0,
@@ -272,7 +307,8 @@ class VowelRecognizer:
     def _empty() -> dict:
         return {
             "vol": 0.0, "voiced": False, "f0": 0.0,
-            "frica": None, "frica_conf": 0.0, "formants": [],
+            "frica": None, "frica_conf": 0.0,
+            "vfrica": None, "vfrica_conf": 0.0, "formants": [],
             "vowel": None, "confidence": 0.0,
             "scores": {v: 0.0 for v in VOWELS},
         }

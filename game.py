@@ -17,6 +17,7 @@ Lancement :
 
 from __future__ import annotations
 
+import io
 import multiprocessing
 import os
 import sys
@@ -32,7 +33,8 @@ import pygame
 
 import random
 
-from recognition import VowelRecognizer, VOWELS, FRICATIVES
+from recognition import VowelRecognizer, VOWELS, FRICATIVES, VOICED_FRICATIVES
+import phonemes
 from speech import WordRecognizer, DEFAULT_MODEL
 from session import SessionLog
 import pictos
@@ -232,6 +234,7 @@ class Game:
         self.scene = "car"
         self.mode = "free"
         self.vowel = "A"
+        self.nonreader = False           # Son cible : afficher le picto-référent
         self.energy = 0.0
         self.won = False
         self.win_time = 0
@@ -303,10 +306,27 @@ class Game:
         self.pair_msg = ""
         self.pair_heard = ""
         self.pair_done = 0
-        # cache de pictogrammes multi-mots (écoute / paires)
+        # fusion phonémique
+        self.fusion_i = 0
+        self.fusion: tuple[str, str, str] | None = None
+        self.fusion_ok = False
+        self.fusion_done = 0
+        self.fusion_reveal = False
+        self.fusion_msg = ""
+        self.fusion_heard = ""
+        # cache de pictogrammes multi-mots (écoute / paires / fusion)
         self.pcache: dict[str, object] = {}
         self._pcache_results: list[tuple[str, str | None]] = []
         self._card_rects: list[tuple[pygame.Rect, str]] = []
+        # menu picto orthophoniste (modal)
+        self.menu_open = False
+        self.menu_word = ""
+        self.menu_ids: list[int] = []
+        self.menu_thumbs: dict[int, object] = {}
+        self.menu_msg = ""
+        self.menu_loading = False
+        self._menu_results: list[tuple[int, bytes | None]] = []
+        self._menu_rects: list[tuple[pygame.Rect, tuple]] = []
         self._cheer = self._make_cheer() if self.mixer_ok else None
         self._apply_sensitivity()
 
@@ -344,11 +364,14 @@ class Game:
         self.b_mode = {"free": Button("Son libre"), "target": Button("Son cible"),
                        "word": Button("Mot cible"), "loud": Button("Intensité"),
                        "pitch": Button("Hauteur"), "breath": Button("Souffle"),
-                       "listen": Button("Écoute"), "pairs": Button("Paires")}
+                       "listen": Button("Écoute"), "pairs": Button("Paires"),
+                       "fusion": Button("Fusion")}
         self.b_mode["free"].selected = True
         self.b_vowel = {v: Button(v, key=v) for v in VOWELS}
         self.b_vowel["A"].selected = True
-        self.b_frica = {k: Button(k) for k in FRICATIVES}   # fricatives S/CH/F
+        # consonnes cibles : S/CH/F (fiables) + V/Z/R/L/AN (expérimentales)
+        self.b_frica = {k: Button(k) for k in phonemes.CONSONANTS}
+        self.b_nonreader = Button("Non lecteur")
         self.b_hold = Button("Reste en place"); self.b_hold.selected = self.hold
         self.b_speak = Button("🎤 Parler", kind="primary")
         self.b_clear = Button("Effacer")
@@ -376,6 +399,11 @@ class Game:
         # paires minimales
         self.b_contrast = Button("Contraste")
         self.b_newpair = Button("Autre paire")
+        # fusion phonémique
+        self.b_newfusion = Button("Autre fusion")
+        self.b_reveal = Button("Montrer")
+        # menu picto (édition des images)
+        self.b_pictomenu = Button("🖼 Pictos")
         self.s_sens = Slider("Sensibilité", self.sensitivity)
         self.s_str = Slider("Exigence", (self.threshold - 0.2) / 0.65)
         self.b_mic = Button("▶︎ Démarrer le micro", kind="primary")
@@ -385,6 +413,7 @@ class Game:
         yield from self.b_mode.values()
         yield from self.b_vowel.values()
         yield from self.b_frica.values()
+        yield self.b_nonreader
         yield self.b_hold
         yield self.b_speak
         yield self.b_clear
@@ -403,6 +432,9 @@ class Game:
         yield self.b_newround
         yield self.b_contrast
         yield self.b_newpair
+        yield self.b_newfusion
+        yield self.b_reveal
+        yield self.b_pictomenu
         yield self.b_mic
 
     def _sliders(self):
@@ -416,24 +448,32 @@ class Game:
         word = m == "word"
         listen = m == "listen"
         pairs = m == "pairs"
+        fusion = m == "fusion"
+        speakish = word or pairs or fusion
         for v in self.b_vowel.values():
             v.visible = target
         for v in self.b_frica.values():
             v.visible = target
+        self.b_nonreader.visible = target
+        self.b_nonreader.selected = self.nonreader
         for b in self.b_scene.values():
             b.visible = m in ("free", "target")
         self.s_str.visible = m in ("target", "loud", "pitch")
         self.s_sens.visible = m not in ("listen",)
         self.b_hold.visible = m in ("free", "target")
-        self.b_speak.visible = word or pairs
+        self.b_speak.visible = speakish
         self.b_clear.visible = word
-        self.b_model.visible = word or pairs
+        self.b_model.visible = speakish
         self.b_picto.visible = word
         self.b_list.visible = word or listen
         self.b_next.visible = word
         self.b_denom.visible = word
-        self.b_auto.visible = word or pairs
-        self.b_export.visible = word or listen or pairs
+        self.b_auto.visible = speakish
+        self.b_export.visible = word or listen or pairs or fusion
+        self.b_newfusion.visible = fusion
+        self.b_reveal.visible = fusion
+        self.b_pictomenu.visible = (word or fusion or pairs or listen
+                                    or (target and self.nonreader))
         for b in self.b_zone.values():
             b.visible = m == "loud"
         for b in self.b_pzone.values():
@@ -474,7 +514,9 @@ class Game:
         place(list(self.b_scene.values()), [108, 100, 92])
         place(list(self.b_mode.values()), [96, 96, 100, 100, 92, 88, 84, 78])
         place([self.b_vowel[v] for v in VOWELS], [46] * len(VOWELS))
-        place([self.b_frica[k] for k in FRICATIVES], [52] * len(FRICATIVES))
+        place([self.b_frica[k] for k in phonemes.CONSONANTS],
+              [54] * len(phonemes.CONSONANTS))
+        place([self.b_nonreader], [122])
         place([self.b_hold], [148])
         place([self.b_speak, self.b_clear], [150, 96])
         place([self.b_list, self.b_next], [188, 124])
@@ -485,6 +527,8 @@ class Game:
         place(list(self.b_bgoal.values()), [62, 62, 62, 62])
         place([self.b_replay, self.b_choices, self.b_newround], [148, 104, 134])
         place([self.b_contrast, self.b_newpair], [180, 124])
+        place([self.b_newfusion, self.b_reveal], [140, 110])
+        place([self.b_pictomenu], [110])
         place([self.b_export], [148])
         place([self.s_sens], [156])
         place([self.s_str], [156])
@@ -506,18 +550,40 @@ class Game:
     # ---- audio / logique ------------------------------------------------
     def analyze(self):
         if self.space_down:
-            # repli clavier : simule le son cible (voyelle ou fricative)
+            # repli clavier : simule le son cible courant
             frica = self.vowel if self.vowel in FRICATIVES else None
+            vfrica = self.vowel if self.vowel in VOICED_FRICATIVES else None
             return {"vol": 0.9, "voiced": frica is None, "f0": 200.0,
                     "vowel": self.vowel, "confidence": 1.0,
-                    "frica": frica, "frica_conf": 1.0}
+                    "frica": frica, "frica_conf": 1.0,
+                    "vfrica": vfrica, "vfrica_conf": 1.0}
         if not self.running_mic:
             return {"vol": 0.0, "voiced": False, "f0": 0.0, "vowel": None,
-                    "confidence": 0.0, "frica": None, "frica_conf": 0.0}
+                    "confidence": 0.0, "frica": None, "frica_conf": 0.0,
+                    "vfrica": None, "vfrica_conf": 0.0}
         return self.rec.process(self.mic.frame())
+
+    def _target_conf(self, r=None) -> float:
+        """Confiance que le son courant corresponde à la cible Son cible, selon
+        le type de cible (voyelle / fricative sourde / sonore / expérimentale)."""
+        r = r if r is not None else self.last
+        t = self.vowel
+        typ = phonemes.detect_type(t) if t in phonemes.CONSONANTS else "vowel"
+        if typ == "vowel":
+            return r["confidence"] if (r["voiced"] and r["vowel"] == t) else 0.0
+        if typ == "fric_unv":
+            return r.get("frica_conf", 0.0) if r.get("frica") == t and not r["voiced"] else 0.0
+        if typ == "fric_v":
+            # V/Z : bonus si le détecteur les repère, sinon son tenu voisé
+            if r.get("vfrica") == t:
+                return max(0.5, r.get("vfrica_conf", 0.0))
+            return 0.5 if (r["voiced"] and r["vol"] > 0.08) else 0.0
+        # expérimental (R/L/AN) : tout son tenu voisé fait avancer (validé à l'oreille)
+        return 0.6 if (r["voiced"] and r["vol"] > 0.08) else 0.0
 
     def update(self):
         self._pump_pcache()
+        self._pump_menu()
         now = pygame.time.get_ticks()
         if self.mode == "word":
             self._update_word()
@@ -525,6 +591,8 @@ class Game:
             self._update_listen(now)
         elif self.mode == "pairs":
             self._update_pairs(now)
+        elif self.mode == "fusion":
+            self._update_fusion(now)
         elif self.mode in ("loud", "pitch", "breath"):
             self._update_voice(now)
         else:
@@ -535,12 +603,8 @@ class Game:
         r = self.analyze()
         self.last = r
         if self.mode == "target":
-            if self.vowel in FRICATIVES:
-                conf = r.get("frica_conf", 0.0) if r.get("frica") == self.vowel else 0.0
-                matched = r.get("vol", 0) > 0.04 and conf >= self.threshold
-            else:
-                conf = r["confidence"] if r["voiced"] and r["vowel"] == self.vowel else 0.0
-                matched = conf >= self.threshold
+            conf = self._target_conf(r)
+            matched = conf >= self.threshold and r.get("vol", 0) > 0.04
             drive = r["vol"] * (0.4 + 0.6 * conf) if matched else 0.0
         else:
             drive = r["vol"] if r["voiced"] or self.space_down else 0.0
@@ -714,6 +778,47 @@ class Game:
             self._new_pair()
         self._update_autolisten(now)
 
+    # ---- mode « fusion phonémique » --------------------------------------
+    def _new_fusion(self):
+        self.fusion = random.choice(phonemes.FUSIONS)
+        self.fusion_ok = False
+        self.fusion_done = 0
+        self.fusion_reveal = False
+        self.fusion_msg = ""
+        self.fusion_heard = ""
+        w1, sound, result = self.fusion
+        self._request_pcache(w1)
+        self._request_pcache(phonemes.referent_word(sound))
+        self._request_pcache(result)
+
+    def _update_fusion(self, now):
+        self._update_recording(now)
+        if self._pending is not None:
+            heard, ok = self._pending
+            self._pending = None
+            self.transcribing = False
+            self.fusion_heard = heard
+            result = self.fusion[2]
+            self.session.log("fusion", result, ok, heard)
+            if ok:
+                self.fusion_ok = True
+                self.fusion_reveal = True
+                self.fusion_done = now
+                self.win_time = now
+                self._spawn_fireworks()
+                self._play_cheer()
+                self._add_token()
+            elif heard:
+                self.fusion_msg = f"J'ai entendu « {heard} » — réessaie"
+            else:
+                self.fusion_msg = "Je n'ai rien entendu, réessaie."
+            self._auto_cooldown = now + 1400
+        if self.fusion_done and now - self.fusion_done > 2400:
+            if self.tokens >= self.tokens_goal:
+                self.tokens = 0
+            self._new_fusion()
+        self._update_autolisten(now)
+
     # ---- cache de pictogrammes multi-mots --------------------------------
     def _request_pcache(self, word):
         key = word.strip().lower()
@@ -744,6 +849,136 @@ class Game:
     def _pcache_get(self, word):
         v = self.pcache.get(word.strip().lower())
         return v if isinstance(v, pygame.Surface) else None
+
+    def _invalidate_picto(self, word):
+        """Force le rechargement de l'image d'un mot après changement."""
+        key = word.strip().lower()
+        self.pcache.pop(key, None)
+        if self.picto_word == key:
+            self.picto_word = None
+            self.picto_surface = None
+        self._request_pcache(key)
+
+    # ---- menu picto (orthophoniste) --------------------------------------
+    def _context_word(self) -> str:
+        """Mot dont on édite le pictogramme selon le mode courant."""
+        if self.mode == "word":
+            return self.word.strip() or (self.lists[self.list_idx][1][self.list_pos]
+                                         if self.lists else "")
+        if self.mode == "target" and self.vowel in phonemes.CONSONANTS:
+            return phonemes.referent_word(self.vowel)
+        if self.mode == "fusion" and self.fusion:
+            return self.fusion[0]
+        if self.mode == "pairs" and self.pair:
+            return self.pair[self.pair_target]
+        if self.mode == "listen" and self.listen_opts:
+            return self.listen_target
+        return self.word.strip()
+
+    def _open_picto_menu(self, word):
+        self.menu_open = True
+        self.menu_word = word or ""
+        self.menu_msg = ""
+        self.menu_ids = []
+        self.menu_thumbs = {}
+        self._menu_results = []
+        if self.menu_word.strip():
+            self._menu_search()
+
+    def _menu_search(self):
+        if not self.menu_word.strip() or self.menu_loading:
+            return
+        self.menu_loading = True
+        self.menu_ids = []
+        self.menu_thumbs = {}
+        self._menu_results = []
+        word = self.menu_word.strip()
+
+        def work():
+            ids = pictos.search_ids(word, 8)
+            self.menu_ids = ids
+            for pid in ids:
+                self._menu_results.append((pid, pictos.download_id(pid)))
+            self.menu_loading = False
+            if not ids:
+                self.menu_msg = "Aucun pictogramme trouvé (ou hors-ligne)."
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _pump_menu(self):
+        while self._menu_results:
+            pid, data = self._menu_results.pop(0)
+            if not data:
+                continue
+            try:
+                surf = pygame.image.load(io.BytesIO(data), "p.png").convert_alpha()
+            except Exception:
+                surf = None
+            if surf is not None:
+                self.menu_thumbs[pid] = surf
+
+    def _menu_choose(self, pid):
+        path = pictos.set_from_id(self.menu_word.strip(), pid)
+        if path:
+            self._invalidate_picto(self.menu_word)
+            self.menu_msg = "Pictogramme mis à jour ✔"
+        else:
+            self.menu_msg = "Échec du téléchargement."
+
+    def _menu_upload(self):
+        path = self._pick_file()
+        if not path:
+            return
+        dst = pictos.set_local(self.menu_word.strip(), path)
+        if dst:
+            self._invalidate_picto(self.menu_word)
+            self.menu_msg = "Image locale importée ✔"
+        else:
+            self.menu_msg = "Import impossible (format non reconnu ?)."
+
+    def _pick_file(self):
+        """Sélecteur de fichier natif via tkinter (présent avec Python standard)."""
+        try:
+            import tkinter
+            import tkinter.filedialog as fd
+            root = tkinter.Tk()
+            root.withdraw()
+            root.update()
+            path = fd.askopenfilename(
+                title="Choisir une image",
+                filetypes=[("Images", "*.png *.jpg *.jpeg *.gif *.bmp *.webp")])
+            root.destroy()
+            return path or None
+        except Exception as e:
+            print("Dialogue fichier indisponible :", e)
+            self.menu_msg = "Sélecteur de fichier indisponible."
+            return None
+
+    def _menu_click(self, pos):
+        for rect, action in self._menu_rects:
+            if rect.collidepoint(pos):
+                kind, val = action
+                if kind == "thumb":
+                    self._menu_choose(val)
+                elif kind == "search":
+                    self._menu_search()
+                elif kind == "upload":
+                    self._menu_upload()
+                elif kind == "close":
+                    self.menu_open = False
+                return
+        # clic hors du panneau : ne ferme pas (évite les fermetures accidentelles)
+
+    def _menu_key(self, ev):
+        if ev.key == pygame.K_ESCAPE:
+            self.menu_open = False
+        elif ev.key == pygame.K_BACKSPACE:
+            self.menu_word = self.menu_word[:-1]
+        elif ev.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+            self._menu_search()
+        elif ev.unicode and (ev.unicode.isalpha() or ev.unicode in " -'") \
+                and len(self.menu_word) < 24:
+            self.menu_word += ev.unicode
 
     def reset_progress(self):
         self.energy = 0.0; self.won = False; self.confetti = []
@@ -796,9 +1031,11 @@ class Game:
         self.rec_start = pygame.time.get_ticks()
 
     def _speech_target(self) -> str:
-        """Mot que l'enfant doit prononcer (mode mot ou paire minimale)."""
+        """Mot que l'enfant doit prononcer (mot / paire / fusion)."""
         if self.mode == "pairs" and self.pair:
             return self.pair[self.pair_target]
+        if self.mode == "fusion" and self.fusion:
+            return self.fusion[2]
         return self.word
 
     def _start_transcribe(self, audio):
@@ -855,7 +1092,7 @@ class Game:
     def _update_autolisten(self, now):
         """Mains libres : déclenche l'écoute quand l'enfant se met à parler
         (énergie au-dessus d'un seuil), sans clic."""
-        if not (self.auto_listen and self.mode in ("word", "pairs")):
+        if not (self.auto_listen and self.mode in ("word", "pairs", "fusion")):
             return
         if (self.recording or self.transcribing or self.model_loading
                 or not self.running_mic or not self._speech_target().strip()
@@ -952,6 +1189,11 @@ class Game:
         for key, b in self.b_frica.items():
             if b.visible and b.rect.collidepoint(pos):
                 self._select_target(key); return
+        if self.b_nonreader.visible and self.b_nonreader.rect.collidepoint(pos):
+            self.nonreader = not self.nonreader
+            if self.nonreader and self.vowel in phonemes.CONSONANTS:
+                self._request_pcache(phonemes.referent_word(self.vowel))
+            return
         if self.b_hold.visible and self.b_hold.rect.collidepoint(pos):
             self.hold = not self.hold
             self.b_hold.selected = self.hold
@@ -1007,6 +1249,12 @@ class Game:
             self._new_pair(); return
         if self.b_newpair.visible and self.b_newpair.rect.collidepoint(pos):
             self._new_pair(); return
+        if self.b_newfusion.visible and self.b_newfusion.rect.collidepoint(pos):
+            self._new_fusion(); return
+        if self.b_reveal.visible and self.b_reveal.rect.collidepoint(pos):
+            self.fusion_reveal = not self.fusion_reveal; return
+        if self.b_pictomenu.visible and self.b_pictomenu.rect.collidepoint(pos):
+            self._open_picto_menu(self._context_word()); return
         if self.mode == "listen":
             for rect, wd in self._card_rects:
                 if rect.collidepoint(pos):
@@ -1033,6 +1281,12 @@ class Game:
         elif key == "pairs":
             self._ensure_model_async()
             self._new_pair()
+        elif key == "fusion":
+            self._ensure_model_async()
+            self._new_fusion()
+        elif key == "target":
+            if self.vowel in phonemes.CONSONANTS:
+                self._request_pcache(phonemes.referent_word(self.vowel))
         elif key in ("loud", "pitch", "breath"):
             self.zone_prog = self.pitch_prog = 0.0
             self.vol_ema = self.pitch_ema = 0.0
@@ -1114,6 +1368,8 @@ class Game:
         elif sound in self.b_frica:
             self.b_frica[sound].selected = True
         self.vowel = sound
+        if sound in phonemes.CONSONANTS:
+            self._request_pcache(phonemes.referent_word(sound))
 
     # ---- rendu ----------------------------------------------------------
     def gradient(self, key, w, h, top, bottom):
@@ -1140,7 +1396,85 @@ class Game:
         self.draw_overlay(scene_rect)
         self.draw_meters()
         self.draw_status(scene_rect)
+        if self.menu_open:
+            self.draw_picto_menu()
         pygame.display.flip()
+
+    def draw_picto_menu(self):
+        w, h = self.screen.get_size()
+        veil = pygame.Surface((w, h), pygame.SRCALPHA)
+        veil.fill((20, 24, 40, 150))
+        self.screen.blit(veil, (0, 0))
+        pw, ph = min(820, w - 40), min(580, h - 40)
+        px, py = (w - pw) // 2, (h - ph) // 2
+        panel = pygame.Rect(px, py, pw, ph)
+        pygame.draw.rect(self.screen, COL["panel"], panel, border_radius=18)
+        pygame.draw.rect(self.screen, COL["accent2"], panel, 3, border_radius=18)
+        self._menu_rects = []
+        # titre + champ mot
+        title = self.font_hint.render("Pictogramme du mot :", True, COL["text"])
+        self.screen.blit(title, (px + 24, py + 20))
+        field = pygame.Rect(px + 24, py + 56, pw - 200, 40)
+        pygame.draw.rect(self.screen, (245, 247, 250), field, border_radius=8)
+        pygame.draw.rect(self.screen, COL["accent2"], field, 2, border_radius=8)
+        wt = self.font.render((self.menu_word or "…") + "|", True, COL["text"])
+        self.screen.blit(wt, (field.x + 10, field.y + 9))
+        search = pygame.Rect(field.right + 12, py + 56, 140, 40)
+        self._draw_menu_btn(search, "Chercher", ("search", None))
+        # image actuelle (gauche)
+        cur_lbl = self.font_small.render("Image actuelle :", True, COL["muted"])
+        self.screen.blit(cur_lbl, (px + 24, py + 112))
+        cur = pygame.Rect(px + 24, py + 134, 150, 150)
+        pygame.draw.rect(self.screen, (245, 247, 250), cur, border_radius=12)
+        pic = self._pcache_get(self.menu_word)
+        if pic is not None:
+            sc = min(140 / pic.get_width(), 140 / pic.get_height())
+            img = pygame.transform.smoothscale(
+                pic, (int(pic.get_width() * sc), int(pic.get_height() * sc)))
+            self.screen.blit(img, img.get_rect(center=cur.center))
+        else:
+            t = self.font_small.render("aucune", True, COL["muted"])
+            self.screen.blit(t, t.get_rect(center=cur.center))
+        upload = pygame.Rect(px + 24, py + 300, 150, 38)
+        self._draw_menu_btn(upload, "Importer…", ("upload", None))
+        # alternatives ARASAAC (grille à droite)
+        alt = self.font_small.render(
+            "Propositions ARASAAC (clique pour choisir) :", True, COL["muted"])
+        self.screen.blit(alt, (px + 200, py + 112))
+        gx, gy = px + 200, py + 134
+        cell = 120
+        cols = max(1, (pw - 224) // (cell + 12))
+        for i, pid in enumerate(self.menu_ids):
+            cx = gx + (i % cols) * (cell + 12)
+            cy = gy + (i // cols) * (cell + 12)
+            cell_r = pygame.Rect(cx, cy, cell, cell)
+            pygame.draw.rect(self.screen, (245, 247, 250), cell_r, border_radius=10)
+            th = self.menu_thumbs.get(pid)
+            if isinstance(th, pygame.Surface):
+                sc = min((cell - 12) / th.get_width(), (cell - 12) / th.get_height())
+                im = pygame.transform.smoothscale(
+                    th, (int(th.get_width() * sc), int(th.get_height() * sc)))
+                self.screen.blit(im, im.get_rect(center=cell_r.center))
+            else:
+                d = self.font_small.render("…", True, COL["muted"])
+                self.screen.blit(d, d.get_rect(center=cell_r.center))
+            self._menu_rects.append((cell_r, ("thumb", pid)))
+        if self.menu_loading:
+            ld = self.font_small.render("Recherche…", True, COL["muted"])
+            self.screen.blit(ld, (px + 200, py + ph - 64))
+        if self.menu_msg:
+            m = self.font_small.render(self.menu_msg, True, COL["accent2"])
+            self.screen.blit(m, (px + 24, py + ph - 64))
+        close = pygame.Rect(px + pw - 130, py + ph - 52, 106, 38)
+        self._draw_menu_btn(close, "Fermer", ("close", None))
+
+    def _draw_menu_btn(self, rect, label, action):
+        mouse = pygame.mouse.get_pos()
+        bg = COL["btnhover"] if rect.collidepoint(mouse) else COL["btn"]
+        pygame.draw.rect(self.screen, bg, rect, border_radius=10)
+        t = self.font.render(label, True, COL["text"])
+        self.screen.blit(t, t.get_rect(center=rect.center))
+        self._menu_rects.append((rect, action))
 
     def _draw_tokens(self, r):
         """Jetons (étoiles) vers l'objectif + message d'export éventuel."""
@@ -1185,6 +1519,9 @@ class Game:
             return
         if self.mode == "pairs":
             self._draw_pairs(r)
+            return
+        if self.mode == "fusion":
+            self._draw_fusion(r)
             return
         if self.scene == "car":
             self._draw_car(r)
@@ -1379,6 +1716,46 @@ class Game:
                                       True, COL["muted"])
         self.screen.blit(note, (x0 + 12, y0 + h - 24))
 
+    def _draw_fusion(self, r):
+        """loup (image) + douche (image-référent du son) = louche (caché → révélé)."""
+        x0, y0, w, h = r
+        self.screen.blit(self.gradient("fusion", w, h, (224, 242, 255),
+                                       (255, 236, 246)), (x0, y0))
+        if not self.fusion:
+            return
+        w1, sound, result = self.fusion
+        ref = phonemes.referent_word(sound)
+        cs = min(220, (w - 220) // 3)
+        gap = (w - 3 * cs) // 4
+        yc = y0 + (h - cs) // 2 - 10
+        x1 = x0 + gap
+        x2 = x1 + cs + gap
+        x3 = x2 + cs + gap
+        r1 = pygame.Rect(x1, yc, cs, cs)
+        r2 = pygame.Rect(x2, yc, cs, cs)
+        r3 = pygame.Rect(x3, yc, cs, cs)
+        self._draw_card(r1, w1, (77, 171, 247), show_label=False)
+        self._draw_card(r2, ref, COL["accent"], show_label=False)
+        # le 3e emplacement : « ? » tant que non révélé/réussi
+        if self.fusion_reveal or self.fusion_ok:
+            self._draw_card(r3, result, COL["ok"] if self.fusion_ok else (180, 180, 190))
+        else:
+            pygame.draw.rect(self.screen, (255, 255, 255), r3, border_radius=18)
+            pygame.draw.rect(self.screen, (206, 212, 218), r3, 4, border_radius=18)
+            q = self.font_big.render("?", True, (206, 212, 218))
+            self.screen.blit(q, q.get_rect(center=r3.center))
+        # signes + et =
+        plus = self.font_timer.render("+", True, COL["muted"])
+        self.screen.blit(plus, plus.get_rect(center=((x1 + x2 + cs) // 2, yc + cs // 2)))
+        eq = self.font_timer.render("=", True, COL["muted"])
+        self.screen.blit(eq, eq.get_rect(center=((x2 + x3 + cs) // 2, yc + cs // 2)))
+        # rappel du son sous l'image-référent
+        tip = self.font_small.render(phonemes.referent_tip(sound), True, COL["muted"])
+        self.screen.blit(tip, tip.get_rect(center=(r2.centerx, r2.bottom + 18)))
+        note = self.font_small.render("Pictogrammes : ARASAAC (arasaac.org)",
+                                      True, COL["muted"])
+        self.screen.blit(note, (x0 + 12, y0 + h - 24))
+
     def _flag(self, x, y):
         pygame.draw.line(self.screen, (52, 58, 64), (x, y), (x, y - 46), 3)
         pygame.draw.polygon(self.screen, COL["ok"],
@@ -1457,12 +1834,35 @@ class Game:
             return
         x0, y0, w, h = r
         hit = self._target_conf() >= self.threshold
-        color = (81, 207, 102, 130) if hit else (255, 138, 61, 60)
-        glyph = self.font_big.render(self.vowel, True, color[:3])
-        glyph.set_alpha(color[3])
-        self.screen.blit(glyph, glyph.get_rect(center=(x0 + w // 2, y0 + h // 2 - 20)))
-        hint = self.font_hint.render(f"Fais le son « {self.vowel} » 👄", True, COL["muted"])
-        self.screen.blit(hint, hint.get_rect(center=(x0 + w // 2, y0 + h // 2 + 130)))
+        is_cons = self.vowel in phonemes.CONSONANTS
+        pic = (self._pcache_get(phonemes.referent_word(self.vowel))
+               if (self.nonreader and is_cons) else None)
+        if pic is not None:
+            # mode non lecteur : on montre l'image-référent du son
+            border = COL["ok"] if hit else COL["accent"]
+            box = min(int(h * 0.5), 320)
+            sc = min(box / pic.get_width(), box / pic.get_height())
+            img = pygame.transform.smoothscale(
+                pic, (int(pic.get_width() * sc), int(pic.get_height() * sc)))
+            rect = img.get_rect(center=(x0 + w // 2, y0 + h // 2 - 10))
+            pygame.draw.rect(self.screen, border, rect.inflate(24, 24),
+                             4, border_radius=16)
+            self.screen.blit(img, rect)
+            hint = self.font_hint.render(phonemes.referent_tip(self.vowel),
+                                         True, COL["muted"])
+            self.screen.blit(hint, hint.get_rect(
+                center=(x0 + w // 2, rect.bottom + 40)))
+        else:
+            color = (81, 207, 102, 130) if hit else (255, 138, 61, 60)
+            glyph = self.font_big.render(self.vowel, True, color[:3])
+            glyph.set_alpha(color[3])
+            self.screen.blit(glyph, glyph.get_rect(
+                center=(x0 + w // 2, y0 + h // 2 - 20)))
+            tip = (phonemes.referent_tip(self.vowel) if is_cons
+                   else f"Fais le son « {self.vowel} » 👄")
+            hint = self.font_hint.render(tip, True, COL["muted"])
+            self.screen.blit(hint, hint.get_rect(
+                center=(x0 + w // 2, y0 + h // 2 + 130)))
 
     def draw_meters(self):
         if self.mode not in ("free", "target"):
@@ -1474,22 +1874,13 @@ class Game:
         self._bar("Volume", self.last.get("vol", 0), COL["accent"], x + 12, y + 12, 170)
         if self.mode == "target":
             conf = self._target_conf()
-            heard = (self.last.get("frica") if self.vowel in FRICATIVES
-                     else self.last.get("vowel")) or "—"
+            heard = (self.last.get("frica") or self.last.get("vfrica")
+                     or self.last.get("vowel")) or "—"
             self._bar(f"Ressemblance ({heard})", conf,
                       COL["ok"] if conf >= self.threshold else (206, 212, 218),
                       x + 12, y + 52, 170)
             mx = x + 12 + int(self.threshold * 170)
             pygame.draw.line(self.screen, COL["danger"], (mx, y + 66), (mx, y + 82), 2)
-
-    def _target_conf(self) -> float:
-        """Confiance courante pour la cible sélectionnée (voyelle ou fricative)."""
-        if self.vowel in FRICATIVES:
-            return (self.last.get("frica_conf", 0.0)
-                    if self.last.get("frica") == self.vowel else 0.0)
-        if self.last.get("voiced") and self.last.get("vowel") == self.vowel:
-            return self.last.get("confidence", 0.0)
-        return 0.0
 
     def _bar(self, label, val, color, x, y, w):
         self.screen.blit(self.font_small.render(label, True, COL["text"]), (x, y))
@@ -1533,6 +1924,23 @@ class Game:
                 msg = "Démarre le micro, puis l'enfant dit le mot encadré."
             else:
                 msg = f"Dis : « {t} » (clique « 🎤 Parler » ou Entrée)"
+            self._status_box(r, msg); return
+        if self.mode == "fusion":
+            if self.model_loading:
+                msg = f"⏳ Chargement du modèle « {self.model_size} »…"
+            elif self.recording:
+                msg = "🎤 J'écoute… dis le mot fusionné !"
+            elif self.transcribing:
+                msg = "⏳ Je réfléchis…"
+            elif self.fusion_ok and now - self.win_time < 2400:
+                msg = f"Bravo ! 🎉  {self.fusion[0]} + {self.fusion[1]} = « {self.fusion[2]} »"
+            elif self.fusion_msg:
+                msg = self.fusion_msg
+            elif not self.running_mic:
+                msg = "Démarre le micro. Fusionne les deux sons et dis le mot !"
+            else:
+                tip = phonemes.referent_tip(self.fusion[1]) if self.fusion else ""
+                msg = f"Mélange l'image et le son ({tip}) puis dis le mot !"
             self._status_box(r, msg); return
         if self.mode == "listen":
             if self.listen_done:
@@ -1588,7 +1996,15 @@ class Game:
             for ev in pygame.event.get():
                 if ev.type == pygame.QUIT:
                     running = False
-                elif ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
+                    continue
+                # le menu picto est modal : il capte tous les événements
+                if self.menu_open:
+                    if ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
+                        self._menu_click(ev.pos)
+                    elif ev.type == pygame.KEYDOWN:
+                        self._menu_key(ev)
+                    continue
+                if ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
                     if not self._slider_mousedown(ev.pos):
                         self.on_click(ev.pos)
                 elif ev.type == pygame.MOUSEMOTION:

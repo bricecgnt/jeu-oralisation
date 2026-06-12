@@ -11,8 +11,13 @@ fusée) jusqu'au drapeau d'arrivée.
 - **Son libre** : n'importe quel son tenu fait avancer l'objet (voiture, ballon,
   fusée) — travail du souffle, de la voix, de la durée.
 - **Son cible** : l'objet n'avance que si l'enfant produit le bon son —
-  voyelles **A E I O U OU** (analyse des formants, voir plus bas) ou fricatives
-  tenues **S / CH / F** (travail du sigmatisme, analyse spectrale du bruit).
+  voyelles **A E I O U OU** (formants) ou consonnes tenues **S CH F** (fiables) /
+  **V Z R L AN** (expérimentales, validées à l'oreille). Option **Non lecteur** :
+  affiche le **picto-référent** du son (serpent=sss, vent=fff, moto=vvv,
+  abeille=zzz, lion=rrr…) au lieu de la lettre.
+- **Fusion** : fusion phonémique pour non-lecteurs — une image (*loup*) **+** un
+  son-référent (*douche* = « ch ») **=** le mot à dire (*louche*), vérifié par
+  Whisper. Bouton *Montrer* pour révéler la réponse.
 - **Mot cible** : l'adulte tape un mot ou choisit une **liste**, le mot s'affiche
   en grand avec son **pictogramme ARASAAC** ; l'enfant le dit, un **feu
   d'artifice** salue la bonne réponse (Whisper local). Options : **Cacher le
@@ -34,6 +39,19 @@ fusée) jusqu'au drapeau d'arrivée.
 
 Toutes les réussites sont consignées dans le **journal de séance** (bouton
 « Exporter séance » → CSV dans `~/Documents/jeu-oralisation/seances/`).
+
+### Menu pictogrammes 🖼
+
+Dans les modes à images (Mot, Fusion, Paires, Écoute, Son cible non-lecteur), le
+bouton **« 🖼 Pictos »** ouvre une fenêtre pour, sur le mot courant :
+
+- voir l'**image actuelle** en cache ;
+- choisir **une autre proposition ARASAAC** (clic sur une vignette) si la première
+  ne convient pas ;
+- **importer une image locale** (PNG/JPG…) via le sélecteur de fichiers.
+
+La nouvelle image remplace celle en cache (`~/Library/Caches/jeu-oralisation/pictos/`)
+et est réutilisée partout.
 
 ### Listes de mots
 

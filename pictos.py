@@ -108,14 +108,91 @@ def cached_path(word: str) -> str | None:
 # --------------------------------------------------------------------------
 # API ARASAAC
 # --------------------------------------------------------------------------
+def search_ids(word: str, n: int = 12, timeout: float = 6.0) -> list[int]:
+    """Renvoie jusqu'à `n` identifiants de pictogrammes correspondant au mot."""
+    q = urllib.parse.quote(_norm(word))
+    try:
+        with _open(SEARCH_URL.format(q), timeout) as r:
+            data = json.load(r)
+    except Exception as e:  # pragma: no cover
+        print("ARASAAC recherche indisponible :", repr(e))
+        return []
+    out = []
+    for item in data or []:
+        pid = item.get("_id") or item.get("id")
+        if pid is not None and pid not in out:
+            out.append(int(pid))
+        if len(out) >= n:
+            break
+    return out
+
+
 def search_id(word: str, timeout: float = 6.0):
     """Renvoie l'identifiant du 1er pictogramme correspondant, ou None."""
-    q = urllib.parse.quote(_norm(word))
-    with _open(SEARCH_URL.format(q), timeout) as r:
-        data = json.load(r)
-    if not data:
+    ids = search_ids(word, 1, timeout)
+    return ids[0] if ids else None
+
+
+def image_url(pid: int) -> str:
+    return IMAGE_URL.format(id=pid)
+
+
+def download_id(pid: int, timeout: float = 6.0) -> bytes | None:
+    """Télécharge les octets PNG d'un pictogramme par son id."""
+    try:
+        with _open(IMAGE_URL.format(id=pid), timeout) as r:
+            return r.read()
+    except Exception as e:  # pragma: no cover
+        print("ARASAAC image indisponible :", repr(e))
         return None
-    return data[0].get("_id") or data[0].get("id")
+
+
+def cache_file(word: str) -> str:
+    """Chemin (existant ou non) du fichier de cache pour ce mot."""
+    return os.path.join(CACHE_DIR, _slug(word) + ".png")
+
+
+def set_from_id(word: str, pid: int, timeout: float = 6.0) -> str | None:
+    """Remplace l'image en cache du mot par le pictogramme d'id `pid`."""
+    content = download_id(pid, timeout)
+    if not content:
+        return None
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    path = cache_file(word)
+    with open(path, "wb") as f:
+        f.write(content)
+    return path
+
+
+def set_local(word: str, src_path: str) -> str | None:
+    """Copie une image locale (png/jpg…) comme picto du mot. Convertit si besoin
+    via pygame si disponible, sinon copie brute."""
+    slug = _slug(word)
+    if not slug or not os.path.isfile(src_path):
+        return None
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    dst = os.path.join(CACHE_DIR, slug + ".png")
+    try:
+        import pygame
+        img = pygame.image.load(src_path)
+        pygame.image.save(img, dst)        # normalise en PNG
+    except Exception:
+        import shutil
+        try:
+            shutil.copyfile(src_path, dst)
+        except Exception as e:
+            print("Copie image locale échouée :", repr(e))
+            return None
+    return dst
+
+
+def list_cached() -> list[str]:
+    """Mots ayant un pictogramme en cache (d'après les noms de fichiers)."""
+    try:
+        return sorted(os.path.splitext(f)[0]
+                      for f in os.listdir(CACHE_DIR) if f.endswith(".png"))
+    except OSError:
+        return []
 
 
 def fetch_picto(word: str, timeout: float = 6.0) -> str | None:
