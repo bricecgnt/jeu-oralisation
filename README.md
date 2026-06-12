@@ -6,13 +6,40 @@ Jeu d'oralisation à destination des orthophonistes — **application Python (ma
 L'enfant produit un son dans le micro pour faire avancer un objet (voiture, ballon,
 fusée) jusqu'au drapeau d'arrivée.
 
-- **Son libre** : n'importe quel son tenu fait avancer l'objet (travail du souffle,
-  de la voix, de la durée).
-- **Voyelle cible** : l'objet n'avance que si l'enfant prononce la bonne voyelle
-  (A E I O U), reconnue par analyse des **formants** (voir plus bas).
-- **Mot cible** : l'adulte tape un mot, il s'affiche en grand, l'enfant le dit ; un
-  **feu d'artifice** salue la bonne réponse. Reconnaissance par **Whisper** local
-  (`faster-whisper`, open source, sans réseau après le 1er téléchargement).
+## Les 8 activités
+
+- **Son libre** : n'importe quel son tenu fait avancer l'objet (voiture, ballon,
+  fusée) — travail du souffle, de la voix, de la durée.
+- **Son cible** : l'objet n'avance que si l'enfant produit le bon son —
+  voyelles **A E I O U OU** (analyse des formants, voir plus bas) ou fricatives
+  tenues **S / CH / F** (travail du sigmatisme, analyse spectrale du bruit).
+- **Mot cible** : l'adulte tape un mot ou choisit une **liste**, le mot s'affiche
+  en grand avec son **pictogramme ARASAAC** ; l'enfant le dit, un **feu
+  d'artifice** salue la bonne réponse (Whisper local). Options : **Cacher le
+  mot** (dénomination : l'enfant nomme l'image), **Mains libres** (écoute
+  déclenchée à la voix, sans clic), passage automatique au mot suivant,
+  **jetons** ★ vers un objectif.
+- **Intensité** : garder la voix dans la zone verte (douce / moyenne / forte) —
+  contrôle du volume, projection vocale.
+- **Hauteur** : voix grave / médium / aiguë — la hauteur (F0) fait monter le
+  ballon ; prosodie, mue, surdité appareillée.
+- **Souffle** : tenir « aaaa » pendant 2/3/5/8 s pour gonfler le ballon — temps
+  maximum de phonation.
+- **Écoute** : l'app **prononce un mot** (synthèse vocale macOS, locale) et
+  l'enfant clique la bonne image parmi 2–4 — discrimination auditive,
+  vocabulaire.
+- **Paires minimales** : deux images (*poule/boule*, *chou/joue*…), l'enfant doit
+  dire le mot encadré ; si l'app entend l'autre mot de la paire, elle le dit —
+  contrastes p/b, t/d, k/g, f/v, s/z, ch/j, s/ch, r/l.
+
+Toutes les réussites sont consignées dans le **journal de séance** (bouton
+« Exporter séance » → CSV dans `~/Documents/jeu-oralisation/seances/`).
+
+### Listes de mots
+
+Les modes Mot cible et Écoute utilisent des listes éditables : de simples fichiers
+`.txt` (un mot par ligne) dans `~/Documents/jeu-oralisation/listes/`. Des listes
+d'exemple (animaux, son CH, son S, son R…) sont créées au premier lancement.
 
 ## Installation (macOS)
 

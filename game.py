@@ -30,10 +30,13 @@ os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
 import numpy as np
 import pygame
 
+import random
+
 from recognition import VowelRecognizer, VOWELS, FRICATIVES
 from speech import WordRecognizer, DEFAULT_MODEL
 from session import SessionLog
 import pictos
+import tts
 import wordlists
 
 # Tailles de modèle Whisper proposées à l'adulte (du plus rapide au plus précis).
@@ -220,6 +223,7 @@ class Game:
         self.font_small = pygame.font.SysFont("Arial", 14)
         self.font_big = pygame.font.SysFont("Arial", 220, bold=True)
         self.font_hint = pygame.font.SysFont("Arial", 26)
+        self.font_timer = pygame.font.SysFont("Arial", 54, bold=True)
 
         self.rec = VowelRecognizer(samplerate=FS, noise_floor=0.02)
         self.mic = MicInput()
@@ -270,6 +274,39 @@ class Game:
         self.auto_listen = False         # mains libres : écoute déclenchée à la voix
         self._auto_cooldown = 0
         self.export_msg = ""
+        # jeux de voix : intensité / hauteur / souffle
+        self.dt = 1 / 60                 # durée de la dernière frame (s)
+        self.zone = "moyen"              # intensité : doux / moyen / fort
+        self.vol_ema = 0.0
+        self.zone_prog = 0.0
+        self.pzone = "medium"            # hauteur : grave / medium / aigu
+        self.pitch_ema = 0.0
+        self.pitch_prog = 0.0
+        self.pitch_f0 = 0.0
+        self.breath_goal = 5             # souffle : durée cible (s)
+        self.breath_t = 0.0
+        self.breath_gap = 0.0
+        self.breath_best = 0.0
+        # mode écoute (TTS + choix d'images)
+        self.tts_ok = tts.available()
+        self.listen_n = 3                # nombre d'images proposées
+        self.listen_opts: list[str] = []
+        self.listen_target = ""
+        self.listen_wrong: set[str] = set()
+        self.listen_done = 0
+        # paires minimales
+        self.pair_keys = list(wordlists.MINIMAL_PAIRS.keys())
+        self.pair_ci = 0
+        self.pair: tuple[str, str] | None = None
+        self.pair_target = 0
+        self.pair_ok = False
+        self.pair_msg = ""
+        self.pair_heard = ""
+        self.pair_done = 0
+        # cache de pictogrammes multi-mots (écoute / paires)
+        self.pcache: dict[str, object] = {}
+        self._pcache_results: list[tuple[str, str | None]] = []
+        self._card_rects: list[tuple[pygame.Rect, str]] = []
         self._cheer = self._make_cheer() if self.mixer_ok else None
         self._apply_sensitivity()
 
@@ -305,7 +342,9 @@ class Game:
         }
         self.b_scene["car"].selected = True
         self.b_mode = {"free": Button("Son libre"), "target": Button("Son cible"),
-                       "word": Button("Mot cible")}
+                       "word": Button("Mot cible"), "loud": Button("Intensité"),
+                       "pitch": Button("Hauteur"), "breath": Button("Souffle"),
+                       "listen": Button("Écoute"), "pairs": Button("Paires")}
         self.b_mode["free"].selected = True
         self.b_vowel = {v: Button(v, key=v) for v in VOWELS}
         self.b_vowel["A"].selected = True
@@ -321,6 +360,22 @@ class Game:
         self.b_denom = Button("Cacher le mot")
         self.b_auto = Button("Mains libres")
         self.b_export = Button("Exporter séance")
+        # jeux de voix
+        self.b_zone = {"doux": Button("Doux"), "moyen": Button("Moyen"),
+                       "fort": Button("Fort")}
+        self.b_zone["moyen"].selected = True
+        self.b_pzone = {"grave": Button("Grave"), "medium": Button("Médium"),
+                        "aigu": Button("Aigu")}
+        self.b_pzone["medium"].selected = True
+        self.b_bgoal = {g: Button(f"{g} s") for g in (2, 3, 5, 8)}
+        self.b_bgoal[5].selected = True
+        # écoute
+        self.b_replay = Button("🔊 Réécouter", kind="primary")
+        self.b_choices = Button("Choix : 3")
+        self.b_newround = Button("Nouveau mot")
+        # paires minimales
+        self.b_contrast = Button("Contraste")
+        self.b_newpair = Button("Autre paire")
         self.s_sens = Slider("Sensibilité", self.sensitivity)
         self.s_str = Slider("Exigence", (self.threshold - 0.2) / 0.65)
         self.b_mic = Button("▶︎ Démarrer le micro", kind="primary")
@@ -340,6 +395,14 @@ class Game:
         yield self.b_model
         yield self.b_picto
         yield self.b_export
+        yield from self.b_zone.values()
+        yield from self.b_pzone.values()
+        yield from self.b_bgoal.values()
+        yield self.b_replay
+        yield self.b_choices
+        yield self.b_newround
+        yield self.b_contrast
+        yield self.b_newpair
         yield self.b_mic
 
     def _sliders(self):
@@ -348,29 +411,48 @@ class Game:
     def _layout(self, w):
         """Place les boutons en lignes avec retour à la ligne."""
         global TOP
-        target = self.mode == "target"
-        word = self.mode == "word"
+        m = self.mode
+        target = m == "target"
+        word = m == "word"
+        listen = m == "listen"
+        pairs = m == "pairs"
         for v in self.b_vowel.values():
             v.visible = target
         for v in self.b_frica.values():
             v.visible = target
-        self.s_str.visible = target
-        self.s_sens.visible = not word            # Whisper n'utilise pas la sensibilité
-        self.b_hold.visible = not word
-        self.b_speak.visible = word
+        for b in self.b_scene.values():
+            b.visible = m in ("free", "target")
+        self.s_str.visible = m in ("target", "loud", "pitch")
+        self.s_sens.visible = m not in ("listen",)
+        self.b_hold.visible = m in ("free", "target")
+        self.b_speak.visible = word or pairs
         self.b_clear.visible = word
-        self.b_model.visible = word
+        self.b_model.visible = word or pairs
         self.b_picto.visible = word
-        self.b_list.visible = word
+        self.b_list.visible = word or listen
         self.b_next.visible = word
         self.b_denom.visible = word
-        self.b_auto.visible = word
-        self.b_export.visible = word
+        self.b_auto.visible = word or pairs
+        self.b_export.visible = word or listen or pairs
+        for b in self.b_zone.values():
+            b.visible = m == "loud"
+        for b in self.b_pzone.values():
+            b.visible = m == "pitch"
+        for b in self.b_bgoal.values():
+            b.visible = m == "breath"
+        self.b_replay.visible = listen
+        self.b_choices.visible = listen
+        self.b_newround.visible = listen
+        self.b_contrast.visible = pairs
+        self.b_newpair.visible = pairs
+        self.b_mic.visible = not listen
         self.b_speak.label = ("● J'écoute…" if self.recording else
                               "⏳ …" if self.transcribing else "🎤 Parler")
         self.b_model.label = f"Modèle : {self.model_size}"
         self.b_list.label = (f"Liste : {self.lists[self.list_idx][0]}"
                              if self.lists else "Liste : —")
+        self.b_choices.label = f"Choix : {self.listen_n}"
+        self.b_contrast.label = f"Contraste : {self.pair_keys[self.pair_ci]}"
         self.b_denom.selected = self.hide_word
         self.b_auto.selected = self.auto_listen
 
@@ -390,7 +472,7 @@ class Game:
             x += 14  # espace inter-groupe
 
         place(list(self.b_scene.values()), [108, 100, 92])
-        place(list(self.b_mode.values()), [96, 96, 100])
+        place(list(self.b_mode.values()), [96, 96, 100, 100, 92, 88, 84, 78])
         place([self.b_vowel[v] for v in VOWELS], [46] * len(VOWELS))
         place([self.b_frica[k] for k in FRICATIVES], [52] * len(FRICATIVES))
         place([self.b_hold], [148])
@@ -398,14 +480,22 @@ class Game:
         place([self.b_list, self.b_next], [188, 124])
         place([self.b_denom, self.b_auto], [126, 116])
         place([self.b_model, self.b_picto], [150, 96])
+        place(list(self.b_zone.values()), [86, 92, 80])
+        place(list(self.b_pzone.values()), [86, 96, 80])
+        place(list(self.b_bgoal.values()), [62, 62, 62, 62])
+        place([self.b_replay, self.b_choices, self.b_newround], [148, 104, 134])
+        place([self.b_contrast, self.b_newpair], [180, 124])
         place([self.b_export], [148])
         place([self.s_sens], [156])
         place([self.s_str], [156])
         # micro aligné à droite si la place le permet, sinon à la suite
-        mic_w = 210
-        if x + mic_w > w - pad:
-            x = pad; y += h + gap
-        self.b_mic.rect = pygame.Rect(max(x, w - pad - mic_w), y, mic_w, h)
+        if self.b_mic.visible:
+            mic_w = 210
+            if x + mic_w > w - pad:
+                x = pad; y += h + gap
+            self.b_mic.rect = pygame.Rect(max(x, w - pad - mic_w), y, mic_w, h)
+        else:
+            self.b_mic.rect = pygame.Rect(-10, -10, 0, 0)
         TOP = y + h + pad
 
     # ---- réglages -------------------------------------------------------
@@ -427,10 +517,21 @@ class Game:
         return self.rec.process(self.mic.frame())
 
     def update(self):
+        self._pump_pcache()
+        now = pygame.time.get_ticks()
         if self.mode == "word":
             self._update_word()
-            self._update_fireworks()
-            return
+        elif self.mode == "listen":
+            self._update_listen(now)
+        elif self.mode == "pairs":
+            self._update_pairs(now)
+        elif self.mode in ("loud", "pitch", "breath"):
+            self._update_voice(now)
+        else:
+            self._update_vehicle(now)
+        self._update_fireworks()
+
+    def _update_vehicle(self, now):
         r = self.analyze()
         self.last = r
         if self.mode == "target":
@@ -450,15 +551,199 @@ class Game:
             self.energy = max(0.0, self.energy - 0.006)
         # en mode « Reste en place », l'énergie ne redescend pas quand le son cesse
 
-        now = pygame.time.get_ticks()
         if self.energy >= 1.0 and not self.won:
             self.won = True
             self.win_time = now
             self._play_cheer()
+            if self.mode == "target":
+                self.session.log("son cible", self.vowel, True)
+            else:
+                self.session.log("son libre", "libre", True)
         # après la célébration, on repart à zéro pour rejouer
         if self.won and now - self.win_time > 1600:
             self.reset_progress()
-        self._update_fireworks()
+
+    # ---- jeux de voix : intensité / hauteur / souffle --------------------
+    def _zone_params(self):
+        """(centre, demi-largeur) de la zone cible — l'exigence resserre la zone."""
+        hw = 0.32 - 0.20 * self.s_str.value
+        if self.mode == "loud":
+            c = {"doux": 0.22, "moyen": 0.5, "fort": 0.8}[self.zone]
+        else:
+            c = {"grave": 0.22, "medium": 0.52, "aigu": 0.8}[self.pzone]
+        return c, hw
+
+    def _voice_win(self, activity, target):
+        self.won = True
+        self.win_time = pygame.time.get_ticks()
+        self._spawn_fireworks()
+        self._play_cheer()
+        self.session.log(activity, target, True)
+        self._add_token()
+
+    def _update_voice(self, now):
+        r = self.analyze()
+        self.last = r
+        dt = self.dt
+        if self.mode == "loud":
+            self.vol_ema = 0.75 * self.vol_ema + 0.25 * r["vol"]
+            c, hw = self._zone_params()
+            if not self.won:
+                if abs(self.vol_ema - c) <= hw and self.vol_ema > 0.03:
+                    self.zone_prog = min(1.0, self.zone_prog + dt * 0.4)
+                else:
+                    self.zone_prog = max(0.0, self.zone_prog - dt * 0.15)
+                if self.zone_prog >= 1.0:
+                    self._voice_win("voix intensité", self.zone)
+        elif self.mode == "pitch":
+            if r["voiced"] and r.get("f0", 0) > 0:
+                self.pitch_f0 = r["f0"]
+                p = float(np.clip(np.log(max(r["f0"], 1) / 100.0) / np.log(5.0),
+                                  0.0, 1.0))
+                self.pitch_ema = 0.7 * self.pitch_ema + 0.3 * p
+            c, hw = self._zone_params()
+            if not self.won:
+                if r["voiced"] and abs(self.pitch_ema - c) <= hw:
+                    self.pitch_prog = min(1.0, self.pitch_prog + dt * 0.4)
+                else:
+                    self.pitch_prog = max(0.0, self.pitch_prog - dt * 0.15)
+                if self.pitch_prog >= 1.0:
+                    self._voice_win("voix hauteur", self.pzone)
+        else:  # souffle
+            active = (r["voiced"] and r["vol"] > 0.06) or self.space_down
+            if not self.won:
+                if active:
+                    self.breath_t += dt
+                    self.breath_gap = 0.0
+                else:
+                    self.breath_gap += dt
+                    if self.breath_gap > 0.45:
+                        self.breath_t = 0.0
+                self.breath_best = max(self.breath_best, self.breath_t)
+                if self.breath_t >= self.breath_goal:
+                    self._voice_win("souffle", f"{self.breath_goal} s")
+        # après la célébration : remise à zéro pour rejouer
+        if self.won and now - self.win_time > 2000:
+            self.won = False
+            self.zone_prog = self.pitch_prog = 0.0
+            self.breath_t = 0.0
+            if self.tokens >= self.tokens_goal:
+                self.tokens = 0
+
+    def _add_token(self):
+        self.tokens = min(self.tokens_goal, self.tokens + 1)
+        if self.tokens >= self.tokens_goal:
+            self._spawn_fireworks(12)    # objectif atteint : méga célébration
+
+    # ---- mode « écoute » (TTS + choix d'images) --------------------------
+    def _new_listen_round(self):
+        pool = list(dict.fromkeys(
+            self.lists[self.list_idx][1] if self.lists else []))
+        if len(pool) < max(2, self.listen_n):
+            pool = wordlists.DEFAULT_LISTS["animaux"]
+        n = min(self.listen_n, len(pool))
+        self.listen_opts = random.sample(pool, n)
+        self.listen_target = random.choice(self.listen_opts)
+        self.listen_wrong = set()
+        self.listen_done = 0
+        for wd in self.listen_opts:
+            self._request_pcache(wd)
+        tts.speak(self.listen_target)
+
+    def _listen_click(self, wd):
+        if self.listen_done:
+            return
+        now = pygame.time.get_ticks()
+        if wd == self.listen_target:
+            self.listen_done = now
+            self.win_time = now
+            self._spawn_fireworks()
+            self._play_cheer()
+            self.session.log("écoute", self.listen_target, True, wd)
+            self._add_token()
+        elif wd not in self.listen_wrong:
+            self.listen_wrong.add(wd)
+            self.session.log("écoute", self.listen_target, False, wd)
+            tts.speak(self.listen_target)   # répète le mot pour réessayer
+
+    def _update_listen(self, now):
+        if self.listen_done and now - self.listen_done > 1800:
+            if self.tokens >= self.tokens_goal:
+                self.tokens = 0
+            self._new_listen_round()
+
+    # ---- mode « paires minimales » ---------------------------------------
+    def _new_pair(self):
+        key = self.pair_keys[self.pair_ci]
+        self.pair = random.choice(wordlists.MINIMAL_PAIRS[key])
+        self.pair_target = random.randint(0, 1)
+        self.pair_ok = False
+        self.pair_msg = ""
+        self.pair_heard = ""
+        self.pair_done = 0
+        for wd in self.pair:
+            self._request_pcache(wd)
+
+    def _update_pairs(self, now):
+        self._update_recording(now)
+        if self._pending is not None:
+            heard, ok_t = self._pending
+            self._pending = None
+            self.transcribing = False
+            self.pair_heard = heard
+            target = self.pair[self.pair_target]
+            distr = self.pair[1 - self.pair_target]
+            self.session.log("paires", target, ok_t, heard)
+            if ok_t:
+                self.pair_ok = True
+                self.pair_done = now
+                self.win_time = now
+                self._spawn_fireworks()
+                self._play_cheer()
+                self._add_token()
+            elif WordRecognizer.match(distr, heard):
+                self.pair_msg = f"J'ai entendu « {distr} » — essaie encore !"
+            elif heard:
+                self.pair_msg = f"J'ai entendu « {heard} » — essaie encore"
+            else:
+                self.pair_msg = "Je n'ai rien entendu, réessaie."
+            self._auto_cooldown = now + 1400
+        if self.pair_done and now - self.pair_done > 2000:
+            if self.tokens >= self.tokens_goal:
+                self.tokens = 0
+            self._new_pair()
+        self._update_autolisten(now)
+
+    # ---- cache de pictogrammes multi-mots --------------------------------
+    def _request_pcache(self, word):
+        key = word.strip().lower()
+        if not key or key in self.pcache:
+            return
+        self.pcache[key] = "pending"
+
+        def work():
+            try:
+                path = pictos.fetch_picto(key)
+            except Exception:
+                path = None
+            self._pcache_results.append((key, path))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _pump_pcache(self):
+        while self._pcache_results:
+            key, path = self._pcache_results.pop(0)
+            surf = None
+            if path:
+                try:
+                    surf = pygame.image.load(path).convert_alpha()
+                except Exception:
+                    surf = None
+            self.pcache[key] = surf
+
+    def _pcache_get(self, word):
+        v = self.pcache.get(word.strip().lower())
+        return v if isinstance(v, pygame.Surface) else None
 
     def reset_progress(self):
         self.energy = 0.0; self.won = False; self.confetti = []
@@ -494,7 +779,7 @@ class Game:
         self.heard = ""
 
     def _start_recording(self):
-        if not self.word.strip():
+        if not self._speech_target().strip():
             self.word_msg = "Tape d'abord un mot à dire."; return
         if not self.running_mic:
             self.word_msg = "Démarre le micro pour écouter."; return
@@ -505,13 +790,20 @@ class Game:
         if self.recording or self.transcribing:
             return
         self.word_ok = False; self.heard = ""; self.word_msg = ""
+        self.pair_msg = ""
         self.mic.start_record()
         self.recording = True
         self.rec_start = pygame.time.get_ticks()
 
+    def _speech_target(self) -> str:
+        """Mot que l'enfant doit prononcer (mode mot ou paire minimale)."""
+        if self.mode == "pairs" and self.pair:
+            return self.pair[self.pair_target]
+        return self.word
+
     def _start_transcribe(self, audio):
         self.transcribing = True
-        target = self.word
+        target = self._speech_target()
         rec = self.word_rec          # capturé au cas où le modèle change entre-temps
 
         def work():
@@ -520,12 +812,17 @@ class Game:
 
         threading.Thread(target=work, daemon=True).start()
 
-    def _update_word(self):
-        now = pygame.time.get_ticks()
+    def _update_recording(self, now):
+        """Arrête l'enregistrement à la fin de la fenêtre d'écoute et lance la
+        transcription (commun aux modes mot et paires)."""
         if self.recording and now - self.rec_start >= REC_SECONDS * 1000:
             audio = self.mic.stop_record()
             self.recording = False
             self._start_transcribe(audio)
+
+    def _update_word(self):
+        now = pygame.time.get_ticks()
+        self._update_recording(now)
         if self._pending is not None:
             heard, ok = self._pending
             self._pending = None
@@ -535,7 +832,7 @@ class Game:
             self.session.log("mot", self.word, ok, heard)
             if ok:
                 self.win_time = now
-                self.tokens = min(self.tokens_goal, self.tokens + 1)
+                self._add_token()
                 self._spawn_fireworks()
                 self._play_cheer()
             elif self.word_rec.model is None and self.word_rec.load_error:
@@ -558,10 +855,10 @@ class Game:
     def _update_autolisten(self, now):
         """Mains libres : déclenche l'écoute quand l'enfant se met à parler
         (énergie au-dessus d'un seuil), sans clic."""
-        if not (self.auto_listen and self.mode == "word"):
+        if not (self.auto_listen and self.mode in ("word", "pairs")):
             return
         if (self.recording or self.transcribing or self.model_loading
-                or not self.running_mic or not self.word.strip()
+                or not self.running_mic or not self._speech_target().strip()
                 or now < self._auto_cooldown):
             return
         frame = self.mic.frame()
@@ -601,12 +898,12 @@ class Game:
                     self.picto_found = False
 
     # ---- feu d'artifice -------------------------------------------------
-    def _spawn_fireworks(self):
+    def _spawn_fireworks(self, bursts=6):
         w, h = self.screen.get_size()
         cols = [(255, 107, 107), (255, 212, 59), (105, 219, 124),
                 (77, 171, 247), (218, 119, 242), (255, 138, 61)]
         self.fireworks = []
-        for _ in range(6):
+        for _ in range(bursts):
             cx = np.random.uniform(w * 0.15, w * 0.85)
             cy = np.random.uniform(TOP + 40, max(TOP + 60, h * 0.6))
             col = cols[np.random.randint(len(cols))]
@@ -638,7 +935,7 @@ class Game:
     # ---- événements -----------------------------------------------------
     def on_click(self, pos):
         for key, b in self.b_scene.items():
-            if b.rect.collidepoint(pos):
+            if b.visible and b.rect.collidepoint(pos):
                 for x in self.b_scene.values():
                     x.selected = False
                 b.selected = True; self.scene = key; self.reset_progress(); return
@@ -646,11 +943,8 @@ class Game:
             if b.rect.collidepoint(pos):
                 for x in self.b_mode.values():
                     x.selected = False
-                b.selected = True; self.mode = key; self.reset_progress()
-                if key == "word":
-                    self._ensure_model_async()
-                    if not self.word.strip() and self.lists:
-                        self._set_word(self.lists[self.list_idx][1][self.list_pos])
+                b.selected = True
+                self._switch_mode(key)
                 return
         for key, b in self.b_vowel.items():
             if b.visible and b.rect.collidepoint(pos):
@@ -686,8 +980,63 @@ class Game:
             self.auto_listen = not self.auto_listen; return
         if self.b_export.visible and self.b_export.rect.collidepoint(pos):
             self._export_session(); return
-        if self.b_mic.rect.collidepoint(pos):
+        for key, b in self.b_zone.items():
+            if b.visible and b.rect.collidepoint(pos):
+                for x in self.b_zone.values():
+                    x.selected = False
+                b.selected = True; self.zone = key; self.zone_prog = 0.0; return
+        for key, b in self.b_pzone.items():
+            if b.visible and b.rect.collidepoint(pos):
+                for x in self.b_pzone.values():
+                    x.selected = False
+                b.selected = True; self.pzone = key; self.pitch_prog = 0.0; return
+        for key, b in self.b_bgoal.items():
+            if b.visible and b.rect.collidepoint(pos):
+                for x in self.b_bgoal.values():
+                    x.selected = False
+                b.selected = True; self.breath_goal = key; self.breath_t = 0.0; return
+        if self.b_replay.visible and self.b_replay.rect.collidepoint(pos):
+            tts.speak(self.listen_target); return
+        if self.b_choices.visible and self.b_choices.rect.collidepoint(pos):
+            self.listen_n = {2: 3, 3: 4, 4: 2}[self.listen_n]
+            self._new_listen_round(); return
+        if self.b_newround.visible and self.b_newround.rect.collidepoint(pos):
+            self._new_listen_round(); return
+        if self.b_contrast.visible and self.b_contrast.rect.collidepoint(pos):
+            self.pair_ci = (self.pair_ci + 1) % len(self.pair_keys)
+            self._new_pair(); return
+        if self.b_newpair.visible and self.b_newpair.rect.collidepoint(pos):
+            self._new_pair(); return
+        if self.mode == "listen":
+            for rect, wd in self._card_rects:
+                if rect.collidepoint(pos):
+                    self._listen_click(wd); return
+        if self.b_mic.visible and self.b_mic.rect.collidepoint(pos):
             self.toggle_mic(); return
+
+    def _switch_mode(self, key):
+        """Change de mode et initialise l'état du nouveau mode."""
+        self.mode = key
+        self.reset_progress()
+        # interrompt proprement une écoute en cours
+        if self.recording:
+            self.mic.stop_record()
+            self.recording = False
+        self._pending = None
+        self.transcribing = False
+        if key == "word":
+            self._ensure_model_async()
+            if not self.word.strip() and self.lists:
+                self._set_word(self.lists[self.list_idx][1][self.list_pos])
+        elif key == "listen":
+            self._new_listen_round()
+        elif key == "pairs":
+            self._ensure_model_async()
+            self._new_pair()
+        elif key in ("loud", "pitch", "breath"):
+            self.zone_prog = self.pitch_prog = 0.0
+            self.vol_ema = self.pitch_ema = 0.0
+            self.breath_t = self.breath_gap = 0.0
 
     # ---- pack séance : listes, jetons, export ---------------------------
     def _set_word(self, w):
@@ -784,11 +1133,25 @@ class Game:
         self.screen.fill(COL["bg"])
         scene_rect = pygame.Rect(0, TOP, w, h - TOP)
         self.draw_scene(scene_rect)
+        if self.mode not in ("free", "target"):
+            self._draw_fireworks()
+            self._draw_tokens(scene_rect)
         self.draw_toolbar(w)
         self.draw_overlay(scene_rect)
         self.draw_meters()
         self.draw_status(scene_rect)
         pygame.display.flip()
+
+    def _draw_tokens(self, r):
+        """Jetons (étoiles) vers l'objectif + message d'export éventuel."""
+        x0, y0, w, h = r
+        for i in range(self.tokens_goal):
+            col = COL["accent"] if i < self.tokens else (222, 226, 230)
+            s = self.font_hint.render("★", True, col)
+            self.screen.blit(s, (x0 + w - 40 * (self.tokens_goal - i), y0 + 10))
+        if self.export_msg:
+            e = self.font_small.render(self.export_msg, True, COL["muted"])
+            self.screen.blit(e, (x0 + 12, y0 + h - 24))
 
     def draw_toolbar(self, w):
         pygame.draw.rect(self.screen, COL["panel"], (0, 0, w, TOP))
@@ -801,6 +1164,27 @@ class Game:
     def draw_scene(self, r):
         if self.mode == "word":
             self._draw_word_scene(r)
+            return
+        if self.mode == "loud":
+            label = {"doux": "Voix douce", "moyen": "Voix moyenne",
+                     "fort": "Voix forte"}[self.zone]
+            self._draw_voice_scene(r, self.vol_ema, self.zone_prog, label, "")
+            return
+        if self.mode == "pitch":
+            extra = f"{self.pitch_f0:.0f} Hz" if self.pitch_f0 > 0 else ""
+            label = {"grave": "Voix grave", "medium": "Voix médium",
+                     "aigu": "Voix aiguë"}[self.pzone]
+            self._draw_voice_scene(r, self.pitch_ema, self.pitch_prog,
+                                   label, extra)
+            return
+        if self.mode == "breath":
+            self._draw_breath(r)
+            return
+        if self.mode == "listen":
+            self._draw_listen(r)
+            return
+        if self.mode == "pairs":
+            self._draw_pairs(r)
             return
         if self.scene == "car":
             self._draw_car(r)
@@ -861,18 +1245,139 @@ class Game:
             self.screen.blit(self.font_small.render(note, True, COL["muted"]),
                              (x0 + 12, y0 + 10))
 
-        # jetons (étoiles) vers l'objectif, en haut à droite
-        star = self.font_hint
-        for i in range(self.tokens_goal):
-            col = COL["accent"] if i < self.tokens else (222, 226, 230)
-            s = star.render("★", True, col)
-            self.screen.blit(s, (x0 + w - 40 * (self.tokens_goal - i), y0 + 10))
+    # ---- scènes des jeux de voix -----------------------------------------
+    def _balloon_at(self, cx, cy):
+        pygame.draw.line(self.screen, (134, 142, 150), (cx, cy + 56),
+                         (cx, cy + 92), 2)
+        pygame.draw.ellipse(self.screen, (230, 73, 128),
+                            (cx - 44, cy - 54, 88, 108))
+        pygame.draw.ellipse(self.screen, (255, 255, 255),
+                            (cx - 26, cy - 34, 22, 36))
 
-        # message d'export, le cas échéant
-        if self.export_msg:
-            e = self.font_small.render(self.export_msg, True, COL["muted"])
-            self.screen.blit(e, (x0 + 12, y0 + h - 24))
-        self._draw_fireworks()
+    def _draw_voice_scene(self, r, value, prog, label, extra):
+        """Scène commune intensité / hauteur : le ballon monte avec la valeur,
+        l'enfant doit le maintenir dans la zone verte pour remplir la jauge."""
+        x0, y0, w, h = r
+        self.screen.blit(self.gradient("voice", w, h, (208, 236, 255),
+                                       (255, 243, 224)), (x0, y0))
+        ytop, ybot = y0 + 90, y0 + h - 80
+        span = max(1, ybot - ytop)
+        c, hw = self._zone_params()
+        # zone cible (bande verte translucide)
+        bh = max(8, int(2 * hw * span))
+        by = ybot - int((c + hw) * span)
+        band = pygame.Surface((w - 120, bh), pygame.SRCALPHA)
+        band.fill((81, 207, 102, 70))
+        self.screen.blit(band, (x0 + 60, by))
+        pygame.draw.rect(self.screen, COL["ok"], (x0 + 60, by, w - 120, bh),
+                         2, border_radius=6)
+        # ballon à la hauteur courante
+        cy = ybot - int(float(np.clip(value, 0, 1)) * span)
+        self._balloon_at(x0 + w // 2, cy)
+        # jauge de progression
+        self._bar("Progression", prog, COL["ok"] if prog > 0.99 else COL["accent2"],
+                  x0 + w // 2 - 130, y0 + 16, 260)
+        # libellés
+        self.screen.blit(self.font_hint.render(label, True, COL["muted"]),
+                         (x0 + 16, y0 + 12))
+        if extra:
+            self.screen.blit(self.font_hint.render(extra, True, COL["accent2"]),
+                             (x0 + 16, y0 + 46))
+
+    def _draw_breath(self, r):
+        """Souffle : le ballon gonfle tant que le son est tenu."""
+        x0, y0, w, h = r
+        self.screen.blit(self.gradient("breath", w, h, (224, 242, 255),
+                                       (236, 253, 245)), (x0, y0))
+        frac = min(1.0, self.breath_t / max(0.5, self.breath_goal))
+        rad = 44 + int(frac * min(w, h) * 0.22)
+        cx, cy = x0 + w // 2, y0 + h // 2 + 10
+        col = (230, 73, 128) if not self.won else (81, 207, 102)
+        pygame.draw.ellipse(self.screen, col,
+                            (cx - rad, cy - int(rad * 1.15), rad * 2,
+                             int(rad * 2.3)))
+        pygame.draw.ellipse(self.screen, (255, 255, 255),
+                            (cx - int(rad * 0.55), cy - int(rad * 0.75),
+                             int(rad * 0.45), int(rad * 0.7)))
+        timer = self.font_timer.render(
+            f"{self.breath_t:.1f} s / {self.breath_goal} s", True, COL["text"])
+        self.screen.blit(timer, timer.get_rect(center=(cx, y0 + 46)))
+        best = self.font_small.render(
+            f"Record de la séance : {self.breath_best:.1f} s", True, COL["muted"])
+        self.screen.blit(best, (x0 + 16, y0 + 12))
+
+    # ---- scènes écoute / paires -------------------------------------------
+    def _draw_card(self, rect, word, border, show_label=True):
+        pygame.draw.rect(self.screen, (255, 255, 255), rect, border_radius=18)
+        pygame.draw.rect(self.screen, border, rect, 4, border_radius=18)
+        pic = self._pcache_get(word)
+        if pic is not None:
+            area = rect.inflate(-28, -70)
+            sc = min(area.w / pic.get_width(), area.h / pic.get_height(), 1.0)
+            img = pygame.transform.smoothscale(
+                pic, (int(pic.get_width() * sc), int(pic.get_height() * sc)))
+            self.screen.blit(img, img.get_rect(
+                center=(rect.centerx, rect.centery - 16)))
+            if show_label:
+                lab = self.font.render(word, True, COL["muted"])
+                self.screen.blit(lab, lab.get_rect(
+                    center=(rect.centerx, rect.bottom - 24)))
+        else:
+            pending = self.pcache.get(word.strip().lower()) == "pending"
+            txt = "…" if pending else word
+            lab = self.font_hint.render(txt, True, COL["text"])
+            self.screen.blit(lab, lab.get_rect(center=rect.center))
+
+    def _draw_listen(self, r):
+        x0, y0, w, h = r
+        self.screen.blit(self.gradient("listen", w, h, (255, 244, 224),
+                                       (224, 242, 255)), (x0, y0))
+        self._card_rects = []
+        n = max(1, len(self.listen_opts))
+        cw = min(250, (w - 80 - (n - 1) * 24) // n)
+        ch = min(280, h - 150)
+        total = n * cw + (n - 1) * 24
+        xs = x0 + (w - total) // 2
+        yc = y0 + (h - ch) // 2
+        for i, wd in enumerate(self.listen_opts):
+            rect = pygame.Rect(xs + i * (cw + 24), yc, cw, ch)
+            if self.listen_done and wd == self.listen_target:
+                border = COL["ok"]
+            elif wd in self.listen_wrong:
+                border = COL["danger"]
+            else:
+                border = (222, 226, 230)
+            self._draw_card(rect, wd, border, show_label=False)
+            self._card_rects.append((rect, wd))
+        note = self.font_small.render("Pictogrammes : ARASAAC (arasaac.org)",
+                                      True, COL["muted"])
+        self.screen.blit(note, (x0 + 12, y0 + h - 24))
+
+    def _draw_pairs(self, r):
+        x0, y0, w, h = r
+        self.screen.blit(self.gradient("pairs", w, h, (236, 229, 255),
+                                       (255, 241, 230)), (x0, y0))
+        if not self.pair:
+            return
+        target = self.pair[self.pair_target]
+        hint = self.font_hint.render(f"Dis : « {target} »", True, COL["text"])
+        self.screen.blit(hint, hint.get_rect(center=(x0 + w // 2, y0 + 34)))
+        cw = min(290, (w - 120) // 2)
+        ch = min(300, h - 170)
+        yc = y0 + 70 + (h - 70 - ch) // 2 - 10
+        for i, wd in enumerate(self.pair):
+            rect = pygame.Rect(x0 + w // 2 + (-cw - 18 if i == 0 else 18),
+                               yc, cw, ch)
+            if self.pair_ok and i == self.pair_target:
+                border = COL["ok"]
+            elif i == self.pair_target:
+                border = COL["accent"]
+            else:
+                border = (222, 226, 230)
+            self._draw_card(rect, wd, border)
+        note = self.font_small.render("Pictogrammes : ARASAAC (arasaac.org)",
+                                      True, COL["muted"])
+        self.screen.blit(note, (x0 + 12, y0 + h - 24))
 
     def _flag(self, x, y):
         pygame.draw.line(self.screen, (52, 58, 64), (x, y), (x, y - 46), 3)
@@ -960,7 +1465,7 @@ class Game:
         self.screen.blit(hint, hint.get_rect(center=(x0 + w // 2, y0 + h // 2 + 130)))
 
     def draw_meters(self):
-        if self.mode == "word":
+        if self.mode not in ("free", "target"):
             return
         x, y = 14, TOP + 14
         panel = pygame.Surface((196, 96 if self.mode == "target" else 56), pygame.SRCALPHA)
@@ -1011,6 +1516,52 @@ class Game:
                 msg = "Tape un mot, puis clique « 🎤 Parler » (ou Entrée)."
             else:
                 msg = "Clique « 🎤 Parler » et dis le mot."
+            self._status_box(r, msg); return
+        if self.mode == "pairs":
+            t = self.pair[self.pair_target] if self.pair else "…"
+            if self.model_loading:
+                msg = f"⏳ Chargement du modèle « {self.model_size} »…"
+            elif self.recording:
+                msg = "🎤 J'écoute… dis le mot !"
+            elif self.transcribing:
+                msg = "⏳ Je réfléchis…"
+            elif self.pair_ok and now - self.win_time < 2000:
+                msg = f"Bravo ! 🎉  « {t} »"
+            elif self.pair_msg:
+                msg = self.pair_msg
+            elif not self.running_mic:
+                msg = "Démarre le micro, puis l'enfant dit le mot encadré."
+            else:
+                msg = f"Dis : « {t} » (clique « 🎤 Parler » ou Entrée)"
+            self._status_box(r, msg); return
+        if self.mode == "listen":
+            if self.listen_done:
+                msg = "Bravo ! 🎉"
+            elif not self.tts_ok:
+                msg = ("Pas de voix système : dis le mot « "
+                       + self.listen_target + " » toi-même, l'enfant clique l'image.")
+            else:
+                msg = "Écoute bien… et clique sur la bonne image. (🔊 pour réécouter)"
+            self._status_box(r, msg); return
+        if self.mode == "loud":
+            if self.won and now - self.win_time < 2000:
+                msg = "Bravo ! 🎉"
+            else:
+                lib = {"doux": "douce 🤫", "moyen": "moyenne 🙂", "fort": "forte 📢"}[self.zone]
+                msg = f"Garde ta voix {lib} dans la zone verte !"
+            self._status_box(r, msg); return
+        if self.mode == "pitch":
+            if self.won and now - self.win_time < 2000:
+                msg = "Bravo ! 🎉"
+            else:
+                lib = {"grave": "grave 🐻", "medium": "médium 🙂", "aigu": "aiguë 🐭"}[self.pzone]
+                msg = f"Fais une voix {lib} et reste dans la zone verte !"
+            self._status_box(r, msg); return
+        if self.mode == "breath":
+            if self.won and now - self.win_time < 2000:
+                msg = "Bravo ! 🎉"
+            else:
+                msg = f"Tiens le son « aaaa » pendant {self.breath_goal} s pour gonfler le ballon !"
             self._status_box(r, msg); return
         if self.won and now - self.win_time < 1600:
             msg = "Bravo ! 🎉"
@@ -1069,7 +1620,7 @@ class Game:
                     self.space_down = False
             self.update()
             self.draw()
-            self.clock.tick(60)
+            self.dt = min(self.clock.tick(60) / 1000.0, 0.05)
         self.mic.stop()
         pygame.quit()
 
