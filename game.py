@@ -32,7 +32,9 @@ import pygame
 
 from recognition import VowelRecognizer, VOWELS
 from speech import WordRecognizer, DEFAULT_MODEL
+from session import SessionLog
 import pictos
+import wordlists
 
 # Tailles de modèle Whisper proposées à l'adulte (du plus rapide au plus précis).
 WHISPER_MODELS = ["tiny", "base", "small"]
@@ -257,6 +259,17 @@ class Game:
         self.picto_fetching = False
         self.word_change_t = 0
         self._picto_pending = None       # (mot, chemin|None) renvoyé par le thread
+        # pack séance : listes de mots, jetons, dénomination, mains libres, journal
+        self.session = SessionLog()
+        self.lists = wordlists.load_lists()   # [(nom, [mots…]), …]
+        self.list_idx = 0
+        self.list_pos = 0
+        self.tokens = 0
+        self.tokens_goal = 5
+        self.hide_word = False           # dénomination : picto seul, mot caché
+        self.auto_listen = False         # mains libres : écoute déclenchée à la voix
+        self._auto_cooldown = 0
+        self.export_msg = ""
         self._cheer = self._make_cheer() if self.mixer_ok else None
         self._apply_sensitivity()
 
@@ -301,6 +314,12 @@ class Game:
         self.b_clear = Button("Effacer")
         self.b_model = Button(f"Modèle : {self.model_size}")
         self.b_picto = Button("Image"); self.b_picto.selected = self.show_picto
+        # pack séance
+        self.b_list = Button("Liste")
+        self.b_next = Button("Mot suivant ▶")
+        self.b_denom = Button("Cacher le mot")
+        self.b_auto = Button("Mains libres")
+        self.b_export = Button("Exporter séance")
         self.s_sens = Slider("Sensibilité", self.sensitivity)
         self.s_str = Slider("Exigence", (self.threshold - 0.2) / 0.65)
         self.b_mic = Button("▶︎ Démarrer le micro", kind="primary")
@@ -312,8 +331,13 @@ class Game:
         yield self.b_hold
         yield self.b_speak
         yield self.b_clear
+        yield self.b_list
+        yield self.b_next
+        yield self.b_denom
+        yield self.b_auto
         yield self.b_model
         yield self.b_picto
+        yield self.b_export
         yield self.b_mic
 
     def _sliders(self):
@@ -333,9 +357,18 @@ class Game:
         self.b_clear.visible = word
         self.b_model.visible = word
         self.b_picto.visible = word
+        self.b_list.visible = word
+        self.b_next.visible = word
+        self.b_denom.visible = word
+        self.b_auto.visible = word
+        self.b_export.visible = word
         self.b_speak.label = ("● J'écoute…" if self.recording else
                               "⏳ …" if self.transcribing else "🎤 Parler")
         self.b_model.label = f"Modèle : {self.model_size}"
+        self.b_list.label = (f"Liste : {self.lists[self.list_idx][0]}"
+                             if self.lists else "Liste : —")
+        self.b_denom.selected = self.hide_word
+        self.b_auto.selected = self.auto_listen
 
         pad, gap, h = 12, 6, 40
         x, y = pad, pad
@@ -357,7 +390,10 @@ class Game:
         place([self.b_vowel[v] for v in VOWELS], [46] * len(VOWELS))
         place([self.b_hold], [148])
         place([self.b_speak, self.b_clear], [150, 96])
+        place([self.b_list, self.b_next], [188, 124])
+        place([self.b_denom, self.b_auto], [126, 116])
         place([self.b_model, self.b_picto], [150, 96])
+        place([self.b_export], [148])
         place([self.s_sens], [156])
         place([self.s_str], [156])
         # micro aligné à droite si la place le permet, sinon à la suite
@@ -483,8 +519,10 @@ class Game:
             self.transcribing = False
             self.heard = heard
             self.word_ok = ok
+            self.session.log("mot", self.word, ok, heard)
             if ok:
                 self.win_time = now
+                self.tokens = min(self.tokens_goal, self.tokens + 1)
                 self._spawn_fireworks()
                 self._play_cheer()
             elif self.word_rec.model is None and self.word_rec.load_error:
@@ -492,8 +530,31 @@ class Game:
                                  "requise au tout premier lancement.")
             elif not heard:
                 self.word_msg = "Je n'ai rien entendu, réessaie."
+            self._auto_cooldown = now + 1400
 
+        # passage automatique au mot suivant après la célébration d'une réussite
+        if (self.word_ok and self.lists and now - self.win_time > 2600):
+            self.word_ok = False
+            if self.tokens >= self.tokens_goal:
+                self.tokens = 0          # objectif atteint : on repart à zéro
+            self._next_word()
+
+        self._update_autolisten(now)
         self._update_picto(now)
+
+    def _update_autolisten(self, now):
+        """Mains libres : déclenche l'écoute quand l'enfant se met à parler
+        (énergie au-dessus d'un seuil), sans clic."""
+        if not (self.auto_listen and self.mode == "word"):
+            return
+        if (self.recording or self.transcribing or self.model_loading
+                or not self.running_mic or not self.word.strip()
+                or now < self._auto_cooldown):
+            return
+        frame = self.mic.frame()
+        rms = float(np.sqrt(np.mean(frame * frame))) if frame.size else 0.0
+        if rms > self.rec.noise_floor + 0.02:
+            self._start_recording()
 
     def _update_picto(self, now):
         """Récupère automatiquement le pictogramme ARASAAC du mot saisi
@@ -575,6 +636,8 @@ class Game:
                 b.selected = True; self.mode = key; self.reset_progress()
                 if key == "word":
                     self._ensure_model_async()
+                    if not self.word.strip() and self.lists:
+                        self._set_word(self.lists[self.list_idx][1][self.list_pos])
                 return
         for key, b in self.b_vowel.items():
             if b.visible and b.rect.collidepoint(pos):
@@ -599,8 +662,46 @@ class Game:
             self.picto_surface = None
             self.picto_word = None       # forcera une nouvelle récupération si réactivé
             return
+        if self.b_list.visible and self.b_list.rect.collidepoint(pos):
+            self._cycle_list(); return
+        if self.b_next.visible and self.b_next.rect.collidepoint(pos):
+            self._next_word(); return
+        if self.b_denom.visible and self.b_denom.rect.collidepoint(pos):
+            self.hide_word = not self.hide_word; return
+        if self.b_auto.visible and self.b_auto.rect.collidepoint(pos):
+            self.auto_listen = not self.auto_listen; return
+        if self.b_export.visible and self.b_export.rect.collidepoint(pos):
+            self._export_session(); return
         if self.b_mic.rect.collidepoint(pos):
             self.toggle_mic(); return
+
+    # ---- pack séance : listes, jetons, export ---------------------------
+    def _set_word(self, w):
+        self.word = w
+        self.word_ok = False; self.heard = ""; self.word_msg = ""
+        self.word_change_t = pygame.time.get_ticks()
+        self.picto_surface = None; self.picto_word = None
+
+    def _cycle_list(self):
+        if not self.lists:
+            return
+        self.list_idx = (self.list_idx + 1) % len(self.lists)
+        self.list_pos = 0
+        self._set_word(self.lists[self.list_idx][1][0])
+
+    def _next_word(self, step=1):
+        if not self.lists:
+            return
+        words = self.lists[self.list_idx][1]
+        self.list_pos = (self.list_pos + step) % len(words)
+        self._set_word(words[self.list_pos])
+
+    def _export_session(self):
+        try:
+            path = self.session.export_csv()
+            self.export_msg = "Séance exportée : " + os.path.basename(path)
+        except Exception as e:
+            self.export_msg = f"Échec export : {e}"
 
     def _apply_sliders(self):
         self.sensitivity = self.s_sens.value
@@ -704,8 +805,12 @@ class Game:
                 pic, (int(pic.get_width() * scale), ph))
             self.screen.blit(pic2, pic2.get_rect(center=(cx, y0 + int(h * 0.40))))
 
-        # mot (sous le picto s'il y en a un, sinon centré)
-        word = self.word if self.word.strip() else "…"
+        # mot (sous le picto s'il y en a un, sinon centré).
+        # En mode dénomination, le mot est caché tant que l'enfant n'a pas réussi.
+        if self.hide_word and not success and self.word.strip():
+            word = "•" * len(self.word.strip())
+        else:
+            word = self.word if self.word.strip() else "…"
         color = COL["ok"] if success else COL["text"]
         glyph = self.font_big.render(word, True, color)
         maxw = w * 0.9
@@ -731,6 +836,18 @@ class Game:
         if note:
             self.screen.blit(self.font_small.render(note, True, COL["muted"]),
                              (x0 + 12, y0 + 10))
+
+        # jetons (étoiles) vers l'objectif, en haut à droite
+        star = self.font_hint
+        for i in range(self.tokens_goal):
+            col = COL["accent"] if i < self.tokens else (222, 226, 230)
+            s = star.render("★", True, col)
+            self.screen.blit(s, (x0 + w - 40 * (self.tokens_goal - i), y0 + 10))
+
+        # message d'export, le cas échéant
+        if self.export_msg:
+            e = self.font_small.render(self.export_msg, True, COL["muted"])
+            self.screen.blit(e, (x0 + 12, y0 + h - 24))
         self._draw_fireworks()
 
     def _flag(self, x, y):
@@ -898,8 +1015,12 @@ class Game:
                     if ev.key == pygame.K_ESCAPE:
                         running = False
                     elif self.mode == "word":
-                        # saisie du mot par l'adulte
-                        if ev.key == pygame.K_BACKSPACE:
+                        # navigation dans la liste + saisie du mot par l'adulte
+                        if ev.key == pygame.K_RIGHT:
+                            self._next_word(1)
+                        elif ev.key == pygame.K_LEFT:
+                            self._next_word(-1)
+                        elif ev.key == pygame.K_BACKSPACE:
                             self.word = self.word[:-1]; self._word_edited()
                         elif ev.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
                             self._start_recording()
