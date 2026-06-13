@@ -63,3 +63,13 @@ FUSIONS: list[tuple[str, str, str]] = [
     ("rat", "V", "rave"),
     ("rue", "Z", "ruse"),
 ]
+
+# Sons présents dans les fusions (ordre d'apparition) — pour le filtre par cible.
+FUSION_SOUNDS = list(dict.fromkeys(sound for _, sound, _ in FUSIONS))
+
+
+def fusions_for(sound: str | None) -> list[tuple[str, str, str]]:
+    """Fusions filtrées par son cible (None = toutes)."""
+    if not sound:
+        return FUSIONS
+    return [f for f in FUSIONS if f[1] == sound] or FUSIONS

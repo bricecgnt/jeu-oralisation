@@ -308,6 +308,7 @@ class Game:
         self.pair_done = 0
         # fusion phonémique
         self.fusion_i = 0
+        self.fusion_sound: str | None = None     # None = tous les sons
         self.fusion: tuple[str, str, str] | None = None
         self.fusion_ok = False
         self.fusion_done = 0
@@ -400,6 +401,7 @@ class Game:
         self.b_contrast = Button("Contraste")
         self.b_newpair = Button("Autre paire")
         # fusion phonémique
+        self.b_fsound = Button("Son : tous")
         self.b_newfusion = Button("Autre fusion")
         self.b_reveal = Button("Montrer")
         # menu picto (édition des images)
@@ -432,6 +434,7 @@ class Game:
         yield self.b_newround
         yield self.b_contrast
         yield self.b_newpair
+        yield self.b_fsound
         yield self.b_newfusion
         yield self.b_reveal
         yield self.b_pictomenu
@@ -470,8 +473,11 @@ class Game:
         self.b_denom.visible = word
         self.b_auto.visible = speakish
         self.b_export.visible = word or listen or pairs or fusion
+        self.b_fsound.visible = fusion
         self.b_newfusion.visible = fusion
         self.b_reveal.visible = fusion
+        self.b_fsound.label = ("Son : tous" if self.fusion_sound is None
+                               else f"Son : {phonemes.referent_word(self.fusion_sound)}")
         self.b_pictomenu.visible = (word or fusion or pairs or listen
                                     or (target and self.nonreader))
         for b in self.b_zone.values():
@@ -512,7 +518,7 @@ class Game:
             x += 14  # espace inter-groupe
 
         place(list(self.b_scene.values()), [108, 100, 92])
-        place(list(self.b_mode.values()), [96, 96, 100, 100, 92, 88, 84, 78])
+        place(list(self.b_mode.values()), [96, 96, 100, 100, 92, 88, 84, 78, 84])
         place([self.b_vowel[v] for v in VOWELS], [46] * len(VOWELS))
         place([self.b_frica[k] for k in phonemes.CONSONANTS],
               [54] * len(phonemes.CONSONANTS))
@@ -527,7 +533,7 @@ class Game:
         place(list(self.b_bgoal.values()), [62, 62, 62, 62])
         place([self.b_replay, self.b_choices, self.b_newround], [148, 104, 134])
         place([self.b_contrast, self.b_newpair], [180, 124])
-        place([self.b_newfusion, self.b_reveal], [140, 110])
+        place([self.b_fsound, self.b_newfusion, self.b_reveal], [150, 140, 110])
         place([self.b_pictomenu], [110])
         place([self.b_export], [148])
         place([self.s_sens], [156])
@@ -780,7 +786,7 @@ class Game:
 
     # ---- mode « fusion phonémique » --------------------------------------
     def _new_fusion(self):
-        self.fusion = random.choice(phonemes.FUSIONS)
+        self.fusion = random.choice(phonemes.fusions_for(self.fusion_sound))
         self.fusion_ok = False
         self.fusion_done = 0
         self.fusion_reveal = False
@@ -1249,6 +1255,11 @@ class Game:
             self._new_pair(); return
         if self.b_newpair.visible and self.b_newpair.rect.collidepoint(pos):
             self._new_pair(); return
+        if self.b_fsound.visible and self.b_fsound.rect.collidepoint(pos):
+            opts = [None] + phonemes.FUSION_SOUNDS
+            i = opts.index(self.fusion_sound) if self.fusion_sound in opts else 0
+            self.fusion_sound = opts[(i + 1) % len(opts)]
+            self._new_fusion(); return
         if self.b_newfusion.visible and self.b_newfusion.rect.collidepoint(pos):
             self._new_fusion(); return
         if self.b_reveal.visible and self.b_reveal.rect.collidepoint(pos):

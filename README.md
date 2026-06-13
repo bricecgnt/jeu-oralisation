@@ -17,7 +17,8 @@ fusée) jusqu'au drapeau d'arrivée.
   abeille=zzz, lion=rrr…) au lieu de la lettre.
 - **Fusion** : fusion phonémique pour non-lecteurs — une image (*loup*) **+** un
   son-référent (*douche* = « ch ») **=** le mot à dire (*louche*), vérifié par
-  Whisper. Bouton *Montrer* pour révéler la réponse.
+  Whisper. Bouton **Son** pour cibler un son précis (douche, moulin, lion…),
+  *Autre fusion* pour changer, *Montrer* pour révéler la réponse.
 - **Mot cible** : l'adulte tape un mot ou choisit une **liste**, le mot s'affiche
   en grand avec son **pictogramme ARASAAC** ; l'enfant le dit, un **feu
   d'artifice** salue la bonne réponse (Whisper local). Options : **Cacher le
